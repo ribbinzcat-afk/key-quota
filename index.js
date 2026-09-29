@@ -1,23 +1,25 @@
 import { getContext } from "../../../extensions.js";
-import { extensionName, extensionFolderPath, getSettings, getSetting, setSetting, saveSettings } from "./src/store.js";
-import { resolveTarget, maskKey, mainConnectionRoot, normalizeRoot, getProfiles } from "./src/keysource.js";
+import { extensionName, extensionFolderPath, getSettings, getSetting, setSetting, saveSettings, newId, getPack, setPack } from "./src/store.js";
+import { listTargets, resolvePrimaryId, mainConnectionRoot, mainModel, getProfiles } from "./src/keysource.js";
 import { checkQuota, fetchPricing } from "./src/quota.js";
-import { buildEstimates, resolveCurrency } from "./src/estimate.js";
-import { renderPanel, badgeText, esc } from "./src/ui.js";
+import { renderPanel, wandText, summarize, esc } from "./src/ui.js";
 
 const MAX_TOKEN_SAMPLES = 20;
 const MAX_COST_SAMPLES = 15;
 const PRICING_TTL_MS = 30 * 60 * 1000;
+const TARGETS_TTL_MS = 60 * 1000;
+const CONCURRENCY = 3;
 
 const state = {
-    snap: null, pricing: null, pricingRoot: "", pricingAt: 0,
-    error: "", busy: false, target: null, trackedRoot: "",
-    lastCheckAt: 0, gens: 0, genModel: "", pendingIn: null,
-    autoTimer: null, $panel: null, search: "", focusSearch: false,
+    targets: [], results: new Map(), primaryId: "", listedAt: 0, listing: null, listError: "",
+    pricingCache: new Map(),          // root -> { data, at }
+    busyAll: false, lastAutoAt: 0, autoTimer: null,
+    gens: 0, genModel: "", pendingIn: null,
+    $panel: null, search: {}, focusSearch: "",
     warned: new Set(),
 };
 
-/* ---------------- นับโทเคนด้วย tokenizer ของ ST ---------------- */
+/* ---------------- tokenizer ของ ST ---------------- */
 async function countTokens(ctx, text) {
     text = String(text || "");
     if (!text) return 0;
@@ -32,109 +34,174 @@ async function countTokens(ctx, text) {
     } catch (e) { console.warn(`[${extensionName}] countTokens ล้มเหลว:`, e); }
     return Math.ceil(text.length / 4);
 }
-
-function messageText(m) {
-    if (!m) return "";
-    if (typeof m.content === "string") return m.content;
-    if (Array.isArray(m.content)) return m.content.map(p => (typeof p?.text === "string" ? p.text : "")).join("\n");
-    return "";
-}
-
+const messageText = (m) => typeof m?.content === "string" ? m.content
+    : Array.isArray(m?.content) ? m.content.map(p => (typeof p?.text === "string" ? p.text : "")).join("\n") : "";
 function pushLimited(arr, v, max) { arr.push(v); while (arr.length > max) arr.shift(); }
 
-/* ---------------- เช็คยอด ---------------- */
-async function checkNow({ silent = false } = {}) {
-    if (!getSetting("enabled") || state.busy) return;
-    const s = getSettings();
-    state.busy = true; refreshUi();
-    const prev = state.snap;
-    try {
-        const t = await resolveTarget();
-        state.target = { ...t, masked: maskKey(t.key), host: safeHost(t.root) };
-        if (state.trackedRoot && state.trackedRoot !== t.root) { state.gens = 0; state.snap = null; }
-        state.trackedRoot = t.root;
-
-        const snap = await checkQuota(t.root, t.key, { qpuOverride: Number(s.quotaPerUnit) || 0 });
-
-        // ตารางราคา (new-api) — ดึงใหม่ทุก 30 นาทีหรือเมื่อเปลี่ยนร้าน
-        if (state.pricingRoot !== t.root || Date.now() - state.pricingAt > PRICING_TTL_MS) {
-            state.pricing = /openrouter\.ai/i.test(t.root) ? null : await fetchPricing(t.root, t.key);
-            state.pricingRoot = t.root; state.pricingAt = Date.now();
-            populateGroups();
-        }
-
-        // วัดราคาจริงต่อข้อความ: ยอดที่ใช้เพิ่มขึ้นระหว่าง 2 ครั้งที่เช็ค โดยมี AI ตอบแค่ 1 ครั้ง
-        if (prev && prev.root === snap.root && state.gens === 1 && state.genModel
-            && typeof prev.usedUsd === "number" && typeof snap.usedUsd === "number") {
-            const delta = snap.usedUsd - prev.usedUsd;
-            if (delta > 0) {
-                const arr = s.costSamples[state.genModel] || (s.costSamples[state.genModel] = []);
-                pushLimited(arr, delta, MAX_COST_SAMPLES);
+/* ---------------- รายการคีย์ ---------------- */
+async function refreshTargets(force = false) {
+    if (!force && state.targets.length && Date.now() - state.listedAt < TARGETS_TTL_MS) return;
+    if (state.listing) return state.listing;
+    state.listing = (async () => {
+        try {
+            const targets = await listTargets();
+            state.primaryId = await resolvePrimaryId(targets);
+            state.targets = targets;
+            state.listError = "";
+            // ล้างผลของคีย์ที่ไม่อยู่ในรายการแล้ว
+            const ids = new Set(targets.map(t => t.id));
+            for (const id of [...state.results.keys()]) if (!ids.has(id)) state.results.delete(id);
+            // ย้ายแพ็กจากเวอร์ชันเก่ามาผูกกับคีย์ที่กำลังใช้
+            const s = getSettings();
+            if (s.legacyPack && state.primaryId && !state.primaryId.startsWith("err:")) {
+                setPack(state.primaryId, s.legacyPack); delete s.legacyPack; saveSettings();
             }
+            if (state.primaryId && s.openCards[state.primaryId] === undefined) s.openCards[state.primaryId] = true;
+        } catch (e) {
+            console.warn(`[${extensionName}] รวบรวมคีย์ไม่สำเร็จ:`, e);
+            state.listError = e?.message || String(e);
+        } finally {
+            state.listedAt = Date.now();
+            state.listing = null;
         }
-        state.gens = 0; state.genModel = "";
-        state.snap = snap; state.error = "";
-        s.last = { kind: snap.kind, remainingUsd: snap.remainingUsd, checkedAt: snap.checkedAt, root: snap.root };
-        saveSettings();
-        evaluateWarnings();
+    })();
+    refreshUi();
+    await state.listing;
+    refreshUi();
+}
+
+const primaryTarget = () => state.targets.find(t => t.id === state.primaryId) || null;
+
+/* ---------------- เช็คยอด ---------------- */
+async function getPricing(root, key) {
+    if (/openrouter\.ai/i.test(root)) return null;
+    const c = state.pricingCache.get(root);
+    if (c && Date.now() - c.at < PRICING_TTL_MS) return c.data;
+    const data = await fetchPricing(root, key);
+    state.pricingCache.set(root, { data, at: Date.now() });
+    return data;
+}
+
+async function checkOne(t, { silent = true } = {}) {
+    if (!getSetting("enabled") || !t || t.error) return;
+    const s = getSettings();
+    const r = state.results.get(t.id) || {};
+    if (r.busy) return;
+    r.busy = true; state.results.set(t.id, r); refreshUi();
+    const prev = r.snap;
+    try {
+        const snap = await checkQuota(t.root, t.key, { qpuOverride: Number(s.quotaPerUnit) || 0 });
+        r.pricing = await getPricing(t.root, t.key);
+
+        // วัดราคาจริง: คีย์ที่กำลังใช้, AI ตอบ 1 ครั้งพอดีระหว่างการเช็ค 2 ครั้ง
+        if (t.id === state.primaryId) {
+            if (prev && state.gens === 1 && state.genModel
+                && typeof prev.usedUsd === "number" && typeof snap.usedUsd === "number") {
+                const delta = snap.usedUsd - prev.usedUsd;
+                if (delta > 0) {
+                    const k = `${t.root}::${state.genModel}`;
+                    pushLimited(s.costSamples[k] || (s.costSamples[k] = []), delta, MAX_COST_SAMPLES);
+                    saveSettings();
+                }
+            }
+            state.gens = 0; state.genModel = "";
+        }
+        r.snap = snap; r.error = "";
+        populateGroups(r.pricing);
     } catch (e) {
-        console.warn(`[${extensionName}] เช็คยอดไม่สำเร็จ:`, e);
-        state.error = e?.message || String(e);
-        if (!silent) toastr.error(state.error, "Key Quota");
+        console.warn(`[${extensionName}] เช็ค ${t.labels.join("/")} ไม่สำเร็จ:`, e);
+        r.error = e?.message || String(e);
+        if (!silent) toastr.error(`${t.labels.join(" · ")}: ${r.error}`, "Key Quota");
     } finally {
-        state.busy = false; state.lastCheckAt = Date.now();
+        r.busy = false;
         refreshUi();
     }
 }
 
-function safeHost(u) { try { return new URL(u).host; } catch { return u; } }
+async function checkAll({ silent = false } = {}) {
+    if (!getSetting("enabled") || state.busyAll) return;
+    state.busyAll = true; refreshUi();
+    try {
+        await refreshTargets(true);
+        const queue = state.targets.filter(t => !t.error);
+        const worker = async () => { while (queue.length) await checkOne(queue.shift(), { silent: true }); };
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+        const failed = state.targets.filter(t => t.error || state.results.get(t.id)?.error).length;
+        if (!silent && failed) toastr.warning(`เช็คไม่ได้ ${failed} คีย์ (ดูรายละเอียดในแผง)`, "Key Quota");
+        evaluateWarnings();
+    } finally {
+        state.busyAll = false;
+        refreshUi();
+    }
+}
+
+async function checkPrimary() {
+    await refreshTargets();
+    const t = primaryTarget();
+    if (!t) return;
+    await checkOne(t, { silent: true });
+    state.lastAutoAt = Date.now();
+    evaluateWarnings();
+}
 
 function scheduleAutoCheck(delayMs = 2500) {
     if (!getSetting("enabled") || !getSetting("autoCheck")) return;
     clearTimeout(state.autoTimer);
     const minGap = Math.max(5, Number(getSetting("minIntervalSec")) || 15) * 1000;
-    const wait = Math.max(delayMs, state.lastCheckAt + minGap - Date.now());
-    state.autoTimer = setTimeout(() => checkNow({ silent: true }), wait);
+    const wait = Math.max(delayMs, state.lastAutoAt + minGap - Date.now());
+    state.autoTimer = setTimeout(checkPrimary, wait);
 }
 
 /* ---------------- เตือน ---------------- */
 function evaluateWarnings() {
     const s = getSettings();
     if (!s.enabled || !s.warnEnabled) return;
-    const hits = [];
-    const snap = state.snap;
-    if (snap && typeof snap.remainingUsd === "number") {
-        const est = buildEstimates({ snap, pricing: state.pricing, s, currentModel: state.target?.model || "" });
-        const cur = resolveCurrency(snap, s);
-        if (snap.remainingUsd * cur.rate <= (Number(s.warnCredits) || 0)) hits.push(["credits", "ยอดเครดิตใกล้หมดแล้ว"]);
-        const row = est.rows.find(r => r.current);
-        if (row && row.messages !== null && row.messages <= (Number(s.warnMessages) || 0)) {
-            hits.push(["msgs", `${row.model} ใช้ได้อีกประมาณ ${row.messages} ข้อความ`]);
+    const hits = new Map();
+    for (const t of state.targets) {
+        if (t.error) continue;
+        const r = state.results.get(t.id);
+        const pack = getPack(t.id);
+        if (!r?.snap && !pack.enabled) continue;
+        const sm = summarize(t, r, s, getPack);
+        const name = t.labels.join(" · ");
+        if (typeof sm.snap?.remainingUsd === "number" && sm.snap.remainingUsd * sm.est.cur.rate <= (Number(s.warnCredits) || 0)) {
+            hits.set(`${t.id}:c`, `${name}: ยอดเหลือ ${sm.money}`);
+        }
+        if (sm.row && sm.row.messages !== null && sm.row.messages <= (Number(s.warnMessages) || 0)) {
+            hits.set(`${t.id}:m`, `${name}: ${sm.row.model} ใช้ได้อีกประมาณ ${sm.row.messages} ข้อความ`);
+        }
+        if (sm.packLeft !== null && sm.pack.total > 0 && sm.packLeft <= (Number(s.warnMessages) || 0)) {
+            hits.set(`${t.id}:p`, `${name}: แพ็กเหลือ ${sm.packLeft} ข้อความ`);
         }
     }
-    if (s.pack?.enabled) {
-        const left = Math.max(0, (s.pack.total || 0) - (s.pack.used || 0));
-        if (left <= (Number(s.warnMessages) || 0)) hits.push(["pack", `แพ็กข้อความเหลือ ${left} ข้อความ`]);
-    }
-    const now = new Set(hits.map(h => h[0]));
-    for (const [k, msg] of hits) if (!state.warned.has(k)) toastr.warning(msg, "Key Quota", { timeOut: 8000 });
-    state.warned = now;   // เตือนซ้ำเมื่อกลับขึ้นไปแล้วลงมาใหม่เท่านั้น
+    for (const [k, msg] of hits) if (!state.warned.has(k)) toastr.warning(msg, "Key Quota ใกล้หมด", { timeOut: 8000 });
+    state.warned = new Set(hits.keys());
 }
 
 /* ---------------- UI ---------------- */
 function refreshUi() {
     const s = getSettings();
-    // badge
-    const $b = $("#kq-badge");
-    if (s.enabled && s.showBadge) {
-        const b = badgeText(state, s);
-        $b.show().toggleClass("kq-badge-warn", !!b.warn).attr("title", b.title)
-            .find(".kq-badge-text").text(state.busy && !state.snap ? "…" : b.text);
-    } else $b.hide();
-    // panel
-    if (state.$panel) { renderPanel(state.$panel, state, s); state.focusSearch = false; }
-    // settings status
-    $("#kq-settings-status").text(state.error ? `⚠ ${state.error}` : (state.snap ? `เช็คล่าสุด ${new Date(state.snap.checkedAt).toLocaleTimeString()}` : ""));
+    // ข้อความใต้ปุ่มในไม้คทา
+    const $sub = $("#kq-menu-button .kq-wand-sub");
+    if (s.enabled && s.showInWand) {
+        const t = primaryTarget();
+        const w = wandText(t, t ? state.results.get(t.id) : null, s, getPack, state.targets.filter(x => !x.error).length);
+        $sub.text(w.text).toggle(!!w.text);
+        $("#kq-menu-button").toggleClass("kq-wand-warn", !!w.warn).attr("title", w.title || "เช็คโควตาคีย์");
+    } else {
+        $sub.text("").hide();
+        $("#kq-menu-button").removeClass("kq-wand-warn");
+    }
+    if (state.$panel) {
+        renderPanel(state.$panel, {
+            targets: state.targets, results: state.results, primaryId: state.primaryId,
+            busyAll: state.busyAll, listing: !!state.listing, listError: state.listError,
+            search: state.search, focusSearch: state.focusSearch,
+        }, s, getPack);
+        state.focusSearch = "";
+    }
+    const ok = [...state.results.values()].filter(r => r.snap).length;
+    $("#kq-settings-status").text(state.targets.length ? `${state.targets.length} คีย์ · เช็คแล้ว ${ok}` : "");
 }
 
 async function openPanel() {
@@ -142,20 +209,40 @@ async function openPanel() {
     const ctx = getContext();
     const $el = $(`<div class="kq-panel"></div>`);
     state.$panel = $el;
-    $el.on("click", "[data-kq]", async function () {
+
+    $el.on("click", "[data-kq]", function (ev) {
         const act = $(this).data("kq");
+        const id = String($(this).data("id") || "");
         const s = getSettings();
-        if (act === "check") return checkNow();
-        if (act === "pack-plus") s.pack.used = (s.pack.used || 0) + 1;
-        if (act === "pack-minus") s.pack.used = Math.max(0, (s.pack.used || 0) - 1);
-        if (act === "pack-reset") s.pack.used = 0;
-        saveSettings(); syncSettingsUi(); refreshUi();
+        if (act === "check-all") return checkAll();
+        if (act === "check-one") { ev.stopPropagation(); return checkOne(state.targets.find(t => t.id === id), { silent: false }); }
+        if (act === "toggle") {
+            if ($(ev.target).closest("input, .menu_button, label").length) return;
+            s.openCards[id] = !s.openCards[id]; saveSettings(); return refreshUi();
+        }
+        if (act === "pack-plus") { setPack(id, { used: (getPack(id).used || 0) + 1 }); }
+        if (act === "pack-minus") { setPack(id, { used: Math.max(0, (getPack(id).used || 0) - 1) }); }
+        if (act === "pack-plus" || act === "pack-minus") { state.warned.delete(`${id}:p`); evaluateWarnings(); refreshUi(); }
+    });
+    $el.on("change", "[data-kq]", function () {
+        const act = $(this).data("kq");
+        const id = String($(this).data("id") || "");
+        const n = Math.max(0, Math.round(parseFloat(this.value) || 0));
+        if (act === "pack-on") setPack(id, { enabled: this.checked });
+        else if (act === "pack-total") setPack(id, { total: n });
+        else if (act === "pack-used") setPack(id, { used: n });
+        else return;
+        state.warned.delete(`${id}:p`); evaluateWarnings(); refreshUi();
     });
     $el.on("input", ".kq-search", function () {
-        state.search = String($(this).val() || ""); state.focusSearch = true; refreshUi();
+        const id = String($(this).data("id") || "");
+        state.search[id] = String($(this).val() || ""); state.focusSearch = id; refreshUi();
     });
+
     refreshUi();
-    if (!state.snap || Date.now() - state.lastCheckAt > 30000) checkNow();
+    const stale = !state.results.size || [...state.results.values()].every(r => !r.snap || Date.now() - r.snap.checkedAt > 30000);
+    if (stale) checkAll({ silent: true });
+    else refreshTargets();
     try {
         await ctx.callGenericPopup($el, ctx.POPUP_TYPE.TEXT, "", { wide: true, allowVerticalScrolling: true, okButton: "ปิด" });
     } finally {
@@ -168,17 +255,13 @@ function mountWandButton() {
     const btn = $(`
         <div id="kq-menu-button" class="list-group-item flex-container flexGap5 interactable" tabindex="0">
             <div class="fa-solid fa-coins extensionsMenuExtensionButton"></div>
-            <span>เช็คโควตาคีย์</span>
+            <div class="kq-wand-label">
+                <span>เช็คโควตาคีย์</span>
+                <small class="kq-wand-sub"></small>
+            </div>
         </div>`);
     btn.on("click", openPanel);
     $("#extensionsMenu").append(btn);
-}
-
-function mountBadge() {
-    if ($("#kq-badge").length) return;
-    const $b = $(`<div id="kq-badge" class="kq-badge interactable" tabindex="0" title="Key Quota"><i class="fa-solid fa-coins"></i><span class="kq-badge-text">—</span></div>`);
-    $b.on("click", openPanel);
-    $("#leftSendForm").append($b);
 }
 
 function applyEnabled() {
@@ -186,42 +269,59 @@ function applyEnabled() {
     $("#kq-menu-button").toggle(on);
     if (!on) {
         clearTimeout(state.autoTimer);
-        $("#kq-badge").hide();
         if (state.$panel) state.$panel.closest("dialog").find(".popup-button-ok").trigger("click");
     }
     refreshUi();
 }
 
 /* ---------------- Settings drawer ---------------- */
-function populateApiProfiles() {
-    let html = `<option value="">การเชื่อมต่อหลักของ ST ตอนนี้</option>`;
-    for (const p of getProfiles()) {
-        if (!p?.id) continue;
-        html += `<option value="${esc(p.id)}">${esc(p.name || p.id)}${p["api-url"] ? ` — ${esc(p["api-url"])}` : ""}</option>`;
+function populateGroups(pricing) {
+    const $g = $("#kq-group");
+    const have = new Set($g.find("option").map((_, o) => o.value).get());
+    for (const [g, ratio] of Object.entries(pricing?.groupRatio || {})) {
+        if (g === "default" || have.has(g)) continue;
+        $g.append(`<option value="${esc(g)}">${esc(g)} (×${esc(ratio)})</option>`);
     }
-    $("#kq-api-profile").html(html).val(getSetting("apiProfile") || "");
+    $g.val(getSetting("group") || "");
 }
 
-function populateGroups() {
-    const groups = Object.keys(state.pricing?.groupRatio || {});
-    const $g = $("#kq-group");
-    $g.html(`<option value="">default</option>` + groups.filter(g => g !== "default")
-        .map(g => `<option value="${esc(g)}">${esc(g)} (×${esc(state.pricing.groupRatio[g])})</option>`).join(""));
-    $g.val(getSetting("group") || "");
+function renderProfileList() {
+    const s = getSettings();
+    const profiles = getProfiles().filter(p => p?.id);
+    const html = profiles.length ? profiles.map(p => {
+        const url = p.api === "custom" ? p["api-url"] : (p.proxy && p.proxy !== "None" ? `proxy: ${p.proxy}` : p.api);
+        return `<label class="checkbox_label kq-prof">
+            <input type="checkbox" data-prof="${esc(p.id)}" ${s.excludedProfiles.includes(p.id) ? "" : "checked"} />
+            <span>${esc(p.name || p.id)} <small class="kq-dim">${esc(url || "")}</small></span></label>`;
+    }).join("") : `<small>ยังไม่มี Connection Profile</small>`;
+    $("#kq-profile-list").html(html).toggle(!!s.includeProfiles);
+}
+
+function renderManualList() {
+    const s = getSettings();
+    const html = s.manualKeys.map(k => `
+        <div class="kq-mk" data-mk="${esc(k.id)}">
+            <input class="text_pole kq-mk-label" type="text" placeholder="ชื่อเรียก" value="${esc(k.label || "")}" />
+            <input class="text_pole kq-mk-url" type="text" placeholder="https://.../v1" value="${esc(k.url || "")}" />
+            <div class="kq-inline">
+                <input class="text_pole kq-mk-key" type="password" placeholder="sk-..." autocomplete="off" value="${esc(k.key || "")}" />
+                <div class="menu_button fa-solid fa-eye kq-mk-show" title="แสดง/ซ่อนคีย์"></div>
+                <div class="menu_button fa-solid fa-trash-can kq-mk-del" title="ลบคีย์นี้"></div>
+            </div>
+        </div>`).join("");
+    $("#kq-manual-list").html(html || `<small>ยังไม่มีคีย์ที่กรอกเอง</small>`);
 }
 
 function syncSettingsUi() {
     const s = getSettings();
     $("#kq-enabled").prop("checked", !!s.enabled);
-    $("#kq-key-source").val(s.keySource);
-    $(".kq-src-profile").toggle(s.keySource === "profile");
-    $(".kq-src-manual").toggle(s.keySource === "manual");
-    populateApiProfiles();
-    $("#kq-manual-url").val(s.manualUrl);
-    $("#kq-manual-key").val(s.manualKey);
+    $("#kq-inc-main").prop("checked", !!s.includeMain);
+    $("#kq-inc-profiles").prop("checked", !!s.includeProfiles);
+    renderProfileList();
+    renderManualList();
     $("#kq-auto").prop("checked", !!s.autoCheck);
     $("#kq-interval").val(s.minIntervalSec);
-    $("#kq-badge-on").prop("checked", !!s.showBadge);
+    $("#kq-wand-on").prop("checked", !!s.showInWand);
     $("#kq-warn").prop("checked", !!s.warnEnabled);
     $("#kq-warn-credits").val(s.warnCredits);
     $("#kq-warn-msgs").val(s.warnMessages);
@@ -232,90 +332,104 @@ function syncSettingsUi() {
     $("#kq-avg-in").val(s.avgIn);
     $("#kq-avg-out").val(s.avgOut);
     $("#kq-prices").val(s.manualPrices);
-    $("#kq-pack-on").prop("checked", !!s.pack.enabled);
-    $("#kq-pack-total").val(s.pack.total);
-    $("#kq-pack-used").val(s.pack.used);
-    $(".kq-pack-fields").toggle(!!s.pack.enabled);
-    populateGroups();
+    $("#kq-group").val(s.group || "");
     const n = Object.values(s.costSamples || {}).reduce((a, b) => a + (b?.length || 0), 0);
     $("#kq-samples-info").text(`เก็บไว้: ขนาดข้อความ ${s.measured.in.length} ครั้ง · ราคาจริง ${n} ครั้ง`);
 }
 
+function targetsChanged() { state.listedAt = 0; refreshUi(); }
+
 function bindSettingsHandlers() {
     const num = (v, d = 0) => { const n = parseFloat(v); return isFinite(n) ? n : d; };
     const on = (sel, ev, fn) => $(document).on(ev, sel, fn);
-    const after = () => { syncSettingsUi(); refreshUi(); };
 
     on("#kq-enabled", "change", function () { setSetting("enabled", this.checked); applyEnabled(); });
-    on("#kq-key-source", "change", function () { setSetting("keySource", this.value); state.snap = null; after(); });
-    on("#kq-api-profile", "change", function () { setSetting("apiProfile", this.value); state.snap = null; after(); });
-    on("#kq-api-profile", "focus", populateApiProfiles);
-    on("#kq-manual-url", "change", function () { setSetting("manualUrl", this.value.trim()); state.snap = null; after(); });
-    on("#kq-manual-key", "change", function () { setSetting("manualKey", this.value.trim()); state.snap = null; after(); });
+    on("#kq-inc-main", "change", function () { setSetting("includeMain", this.checked); targetsChanged(); });
+    on("#kq-inc-profiles", "change", function () { setSetting("includeProfiles", this.checked); renderProfileList(); targetsChanged(); });
+    on("#kq-profile-list input[data-prof]", "change", function () {
+        const s = getSettings(); const id = $(this).data("prof");
+        s.excludedProfiles = s.excludedProfiles.filter(x => x !== id);
+        if (!this.checked) s.excludedProfiles.push(id);
+        saveSettings(); targetsChanged();
+    });
+    on("#kq-refresh-profiles", "click", renderProfileList);
+
+    on("#kq-add-key", "click", () => {
+        getSettings().manualKeys.push({ id: newId(), label: "", url: "", key: "" });
+        saveSettings(); renderManualList();
+    });
+    on("#kq-manual-list .kq-mk input", "change", function () {
+        const id = $(this).closest(".kq-mk").data("mk");
+        const k = getSettings().manualKeys.find(x => x.id === id);
+        if (!k) return;
+        if ($(this).hasClass("kq-mk-label")) k.label = this.value.trim();
+        if ($(this).hasClass("kq-mk-url")) k.url = this.value.trim();
+        if ($(this).hasClass("kq-mk-key")) k.key = this.value.trim();
+        saveSettings(); targetsChanged();
+    });
+    on("#kq-manual-list .kq-mk-show", "click", function () {
+        const $k = $(this).closest(".kq-mk").find(".kq-mk-key");
+        $k.attr("type", $k.attr("type") === "password" ? "text" : "password");
+    });
+    on("#kq-manual-list .kq-mk-del", "click", function () {
+        const id = $(this).closest(".kq-mk").data("mk");
+        const s = getSettings();
+        s.manualKeys = s.manualKeys.filter(x => x.id !== id);
+        saveSettings(); renderManualList(); targetsChanged();
+    });
+
     on("#kq-auto", "change", function () { setSetting("autoCheck", this.checked); });
     on("#kq-interval", "change", function () { setSetting("minIntervalSec", Math.max(5, num(this.value, 15))); });
-    on("#kq-badge-on", "change", function () { setSetting("showBadge", this.checked); refreshUi(); });
+    on("#kq-wand-on", "change", function () { setSetting("showInWand", this.checked); refreshUi(); });
     on("#kq-warn", "change", function () { setSetting("warnEnabled", this.checked); state.warned.clear(); });
     on("#kq-warn-credits", "change", function () { setSetting("warnCredits", num(this.value, 0)); state.warned.clear(); refreshUi(); });
     on("#kq-warn-msgs", "change", function () { setSetting("warnMessages", Math.max(0, Math.round(num(this.value, 0)))); state.warned.clear(); refreshUi(); });
     on("#kq-currency", "change", function () { setSetting("displayCurrency", this.value); refreshUi(); });
     on("#kq-cny", "change", function () { setSetting("cnyRate", num(this.value, 7.3)); refreshUi(); });
-    on("#kq-qpu", "change", function () { setSetting("quotaPerUnit", Math.max(0, num(this.value, 0))); state.snap = null; checkNow(); });
+    on("#kq-qpu", "change", function () { setSetting("quotaPerUnit", Math.max(0, num(this.value, 0))); state.results.clear(); refreshUi(); });
     on("#kq-group", "change", function () { setSetting("group", this.value); refreshUi(); });
     on("#kq-measured", "change", function () { setSetting("useMeasuredTokens", this.checked); refreshUi(); });
     on("#kq-avg-in", "change", function () { setSetting("avgIn", Math.max(0, Math.round(num(this.value, 6000)))); refreshUi(); });
     on("#kq-avg-out", "change", function () { setSetting("avgOut", Math.max(0, Math.round(num(this.value, 500)))); refreshUi(); });
     on("#kq-prices", "change", function () { setSetting("manualPrices", this.value); refreshUi(); });
-    on("#kq-pack-on", "change", function () { getSettings().pack.enabled = this.checked; saveSettings(); after(); });
-    on("#kq-pack-total", "change", function () { getSettings().pack.total = Math.max(0, Math.round(num(this.value, 0))); saveSettings(); state.warned.clear(); after(); });
-    on("#kq-pack-used", "change", function () { getSettings().pack.used = Math.max(0, Math.round(num(this.value, 0))); saveSettings(); state.warned.clear(); after(); });
     on("#kq-open-panel", "click", openPanel);
-    on("#kq-check-now", "click", () => checkNow());
+    on("#kq-check-all", "click", () => checkAll());
     on("#kq-clear-samples", "click", () => {
         const s = getSettings();
         s.measured = { in: [], out: [] }; s.costSamples = {};
-        saveSettings(); after();
+        saveSettings(); syncSettingsUi(); refreshUi();
         toastr.info("ล้างค่าที่วัดไว้แล้ว", "Key Quota");
-    });
-    on("#kq-toggle-key", "click", () => {
-        const $k = $("#kq-manual-key");
-        $k.attr("type", $k.attr("type") === "password" ? "text" : "password");
     });
 }
 
 /* ---------------- Events ---------------- */
-function isTrackedConnection() {
-    if (!state.trackedRoot) return true;           // ยังไม่เคยเช็ค → ถือว่าใช่ไปก่อน
+function usingPrimary() {
+    const t = primaryTarget();
     const main = mainConnectionRoot();
-    if (!main) return false;
-    return normalizeRoot(main) === state.trackedRoot;
+    return !!(t && main && main === t.root);
 }
 
 function bindChatEvents(ctx) {
     const E = ctx.eventTypes;
 
-    // วัดขนาด prompt ขาเข้า (ใช้ tokenizer ของ ST)
     ctx.eventSource.on(E.CHAT_COMPLETION_PROMPT_READY, async (data) => {
         if (!getSetting("enabled") || !data || data.dryRun || !Array.isArray(data.chat)) return;
-        try {
-            const text = data.chat.map(messageText).join("\n");
-            state.pendingIn = await countTokens(getContext(), text);
-        } catch (e) { console.warn(`[${extensionName}] นับโทเคนขาเข้าไม่ได้:`, e); }
+        try { state.pendingIn = await countTokens(getContext(), data.chat.map(messageText).join("\n")); }
+        catch (e) { console.warn(`[${extensionName}] นับโทเคนขาเข้าไม่ได้:`, e); }
     });
 
-    // นับจำนวนครั้งที่ยิง API ระหว่างการเช็ค (รวม quiet generation ของ extension อื่น)
-    ctx.eventSource.on(E.GENERATION_STARTED, (_type, _params, dryRun) => {
+    ctx.eventSource.on(E.GENERATION_STARTED, async (_type, _params, dryRun) => {
         if (!getSetting("enabled") || dryRun) return;
-        if (!isTrackedConnection()) return;
+        if (!state.primaryId) await refreshTargets();
+        if (!usingPrimary()) return;
         state.gens += 1;
-        try { state.genModel = getContext().getChatCompletionModel?.() || ""; } catch { state.genModel = ""; }
+        state.genModel = mainModel();
     });
 
     ctx.eventSource.on(E.MESSAGE_RECEIVED, async (id, type) => {
         if (!getSetting("enabled") || type === "first_message") return;
         const s = getSettings();
         const c = getContext();
-        // วัดขนาดคำตอบ
         if (state.pendingIn !== null && type !== "continue") {
             const out = await countTokens(c, c.chat?.[id]?.mes || "");
             if (out > 0) {
@@ -324,22 +438,23 @@ function bindChatEvents(ctx) {
             }
         }
         state.pendingIn = null;
-        // แพ็กรายข้อความ
-        if (s.pack.enabled && isTrackedConnection()) s.pack.used = (s.pack.used || 0) + 1;
+        if (state.primaryId && usingPrimary()) {
+            const p = getPack(state.primaryId);
+            if (p.enabled) setPack(state.primaryId, { used: (p.used || 0) + 1 });
+        }
         saveSettings();
         evaluateWarnings();
         refreshUi();
     });
 
     ctx.eventSource.on(E.GENERATION_ENDED, () => {
-        if (!getSetting("enabled")) return;
-        if (state.gens > 0) scheduleAutoCheck();
+        if (getSetting("enabled") && state.gens > 0) scheduleAutoCheck();
     });
 
-    // เปลี่ยน API/โปรไฟล์ → ล้างผลเก่า
-    const reset = () => { state.snap = null; state.trackedRoot = ""; state.gens = 0; state.target = null; refreshUi(); };
-    if (E.CONNECTION_PROFILE_LOADED) ctx.eventSource.on(E.CONNECTION_PROFILE_LOADED, () => { if (!getSetting("apiProfile")) reset(); });
-    if (E.CHATCOMPLETION_SOURCE_CHANGED) ctx.eventSource.on(E.CHATCOMPLETION_SOURCE_CHANGED, () => { if (!getSetting("apiProfile")) reset(); });
+    // เปลี่ยน API/โปรไฟล์ → หาคีย์ที่กำลังใช้ใหม่
+    const reset = () => { state.gens = 0; state.listedAt = 0; state.primaryId = ""; refreshTargets(true); };
+    if (E.CONNECTION_PROFILE_LOADED) ctx.eventSource.on(E.CONNECTION_PROFILE_LOADED, reset);
+    if (E.CHATCOMPLETION_SOURCE_CHANGED) ctx.eventSource.on(E.CHATCOMPLETION_SOURCE_CHANGED, reset);
 }
 
 /* ---------------- Bootstrap ---------------- */
@@ -351,15 +466,15 @@ jQuery(async () => {
         bindSettingsHandlers();
         syncSettingsUi();
         mountWandButton();
-        mountBadge();
         const ctx = getContext();
         bindChatEvents(ctx);
         applyEnabled();
-        // เช็คครั้งแรกหลังโหลดหน้า (รอให้ ST ตั้งค่า API เสร็จก่อน)
-        if (getSetting("enabled") && getSetting("autoCheck")) setTimeout(() => checkNow({ silent: true }), 4000);
+        // เช็คคีย์ที่กำลังใช้ครั้งแรกหลังโหลดหน้า
+        if (getSetting("enabled") && getSetting("autoCheck")) setTimeout(checkPrimary, 4000);
         console.log(`[${extensionName}] ✅ โหลดสำเร็จ`);
     } catch (error) {
         console.error(`[${extensionName}] ❌ โหลดไม่สำเร็จ:`, error);
         toastr.error("โหลดไม่สำเร็จ (ดู console)", "Key Quota");
     }
 });
+

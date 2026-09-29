@@ -7,43 +7,42 @@ export const extensionFolderPath = `scripts/extensions/third-party/${extensionNa
 export const defaultSettings = {
     enabled: true,
 
-    // แหล่งคีย์
-    keySource: "profile",      // "profile" = ดึงจาก Connection Profile / API หลัก, "manual" = กรอกเอง
-    apiProfile: "",            // "" = การเชื่อมต่อหลักของ ST ตอนนี้
-    manualUrl: "",
-    manualKey: "",
+    // รายการคีย์ที่จะเช็ค
+    includeMain: true,         // การเชื่อมต่อหลักของ ST ตอนนี้
+    includeProfiles: true,     // ทุก Connection Profile ที่มี URL
+    excludedProfiles: [],      // id ของ profile ที่ไม่ต้องเช็ค
+    manualKeys: [],            // [{ id, label, url, key }]
 
     // เช็คเมื่อไร
-    autoCheck: true,           // เช็คหลัง AI ตอบ
-    minIntervalSec: 15,        // กันยิงถี่เกิน
-    showBadge: true,           // ตัวเลขเล็กๆ ข้างช่องพิมพ์
+    autoCheck: true,           // เช็คคีย์ที่กำลังใช้ หลัง AI ตอบ
+    minIntervalSec: 15,
+    showInWand: true,          // แสดงยอดของคีย์ที่กำลังใช้ในเมนูไม้คทา
 
     // เตือน
     warnEnabled: true,
-    warnCredits: 1,            // หน่วยเดียวกับที่แสดง (เช่น $ หรือ ¥)
-    warnMessages: 20,          // ข้อความคงเหลือของโมเดลที่ใช้อยู่
+    warnCredits: 1,            // หน่วยเดียวกับที่แสดง
+    warnMessages: 20,
 
     // หน่วยเงิน
     displayCurrency: "auto",   // auto | USD | CNY | QUOTA
-    cnyRate: 7.3,              // ใช้เมื่อเลือก CNY เองแต่ร้านไม่บอกเรท
-    quotaPerUnit: 0,           // 0 = อ่านจากร้าน (ค่าปกติ 500000 = $1)
-    group: "",                 // "" = default
+    cnyRate: 7.3,
+    quotaPerUnit: 0,           // 0 = อ่านจากร้าน
+    group: "",
 
-    // ขนาดข้อความ (ใช้ประมาณราคาจากตารางร้าน)
+    // ขนาดข้อความ
     useMeasuredTokens: true,
     avgIn: 6000,
     avgOut: 500,
-    measured: { in: [], out: [] },   // วัดด้วย tokenizer ของ ST (เก็บล่าสุด 20 ครั้ง)
-    costSamples: {},                 // model -> [usd ต่อข้อความ] วัดจากยอดที่ลดจริง
+    measured: { in: [], out: [] },
+    costSamples: {},           // "root::model" -> [$ ต่อข้อความ]
 
-    // ราคากำหนดเอง: บรรทัดละ "ชื่อโมเดล = ราคาต่อข้อความ" (หน่วยเดียวกับที่แสดง)
     manualPrices: "",
 
-    // แพ็กแบบรายข้อความ
-    pack: { enabled: false, total: 0, used: 0 },
-
-    last: null,               // ผลเช็คล่าสุด (ไม่มีคีย์อยู่ในนี้)
+    packs: {},                 // targetId -> { enabled, total, used }
+    openCards: {},             // targetId -> true (การ์ดที่กางไว้ในแผง)
 };
+
+let migrated = false;
 
 export function getSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
@@ -52,10 +51,36 @@ export function getSettings() {
         if (s[k] === undefined) s[k] = structuredClone(defaultSettings[k]);
     }
     if (!s.measured || !Array.isArray(s.measured.in)) s.measured = { in: [], out: [] };
-    if (!s.pack || typeof s.pack !== "object") s.pack = structuredClone(defaultSettings.pack);
     if (!s.costSamples || typeof s.costSamples !== "object") s.costSamples = {};
+    if (!Array.isArray(s.manualKeys)) s.manualKeys = [];
+    if (!Array.isArray(s.excludedProfiles)) s.excludedProfiles = [];
+    if (!s.packs || typeof s.packs !== "object") s.packs = {};
+    if (!s.openCards || typeof s.openCards !== "object") s.openCards = {};
+
+    // ย้ายค่าจากเวอร์ชัน 1.0 (คีย์เดียว)
+    if (!migrated) {
+        migrated = true;
+        if (s.manualUrl && s.manualKey && !s.manualKeys.some(k => k.key === s.manualKey)) {
+            s.manualKeys.push({ id: newId(), label: "คีย์ที่กรอกไว้", url: s.manualUrl, key: s.manualKey });
+        }
+        if (s.pack && s.pack.enabled && !s.legacyPack) s.legacyPack = s.pack;   // จะผูกกับคีย์ที่กำลังใช้ตอนเช็คครั้งแรก
+        if (s.showBadge !== undefined && s.showInWand === undefined) s.showInWand = s.showBadge;
+        for (const k of ["keySource", "apiProfile", "manualUrl", "manualKey", "pack", "showBadge", "last"]) delete s[k];
+    }
     return s;
 }
 export const getSetting = (k) => getSettings()[k];
 export function setSetting(k, v) { getSettings()[k] = v; saveSettingsDebounced(); }
 export const saveSettings = () => saveSettingsDebounced();
+
+export const newId = () => Math.random().toString(36).slice(2, 10);
+
+export function getPack(id) {
+    const s = getSettings();
+    return s.packs[id] || { enabled: false, total: 0, used: 0 };
+}
+export function setPack(id, patch) {
+    const s = getSettings();
+    s.packs[id] = { ...getPack(id), ...patch };
+    saveSettingsDebounced();
+}

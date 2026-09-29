@@ -11,52 +11,49 @@
 
       <div class="kq-row-btns">
         <div id="kq-open-panel" class="menu_button"><i class="fa-solid fa-chart-simple"></i> เปิดแผงโควตา</div>
-        <div id="kq-check-now" class="menu_button"><i class="fa-solid fa-rotate"></i> เช็คตอนนี้</div>
+        <div id="kq-check-all" class="menu_button"><i class="fa-solid fa-rotate"></i> เช็คทุกคีย์</div>
       </div>
       <small id="kq-settings-status" class="kq-status"></small>
+      <small>ปุ่มเปิดแผงอยู่ในเมนูไม้คทา (<i class="fa-solid fa-wand-magic-sparkles"></i>) ข้างช่องพิมพ์</small>
 
       <hr class="sysHR" />
       <b>คีย์ที่จะเช็ค</b>
-      <label for="kq-key-source">เอาคีย์มาจาก</label>
-      <select id="kq-key-source" class="text_pole">
-        <option value="profile">Connection Profile / API หลัก</option>
-        <option value="manual">กรอกเอง</option>
-      </select>
-
-      <div class="kq-src-profile">
-        <label for="kq-api-profile">Connection Profile</label>
-        <select id="kq-api-profile" class="text_pole"></select>
-        <small>ไม่เลือก = ใช้การเชื่อมต่อหลักของ ST ตอนนี้ · ต้องตั้ง <code>allowKeysExposure: true</code> ใน config.yaml ก่อน ถึงจะอ่านคีย์ได้ (ถ้าใช้ Reverse Proxy ที่ใส่รหัสไว้ ไม่ต้องตั้ง)</small>
+      <label class="checkbox_label" for="kq-inc-main">
+        <input id="kq-inc-main" type="checkbox" /><span>การเชื่อมต่อหลักของ ST ตอนนี้</span>
+      </label>
+      <div class="kq-inline">
+        <label class="checkbox_label" for="kq-inc-profiles">
+          <input id="kq-inc-profiles" type="checkbox" /><span>ทุก Connection Profile</span>
+        </label>
+        <div id="kq-refresh-profiles" class="menu_button fa-solid fa-arrows-rotate" title="โหลดรายชื่อโปรไฟล์ใหม่"></div>
       </div>
+      <div id="kq-profile-list" class="kq-profile-list"></div>
+      <small>การอ่านคีย์จาก ST ต้องตั้ง <code>allowKeysExposure: true</code> ใน config.yaml ก่อน (ยกเว้น Reverse Proxy ที่ใส่รหัสไว้) · คีย์ที่ซ้ำกันจะรวมเป็นอันเดียว</small>
 
-      <div class="kq-src-manual">
-        <label for="kq-manual-url">Base URL</label>
-        <input id="kq-manual-url" class="text_pole" type="text" placeholder="https://example.com/v1" />
-        <label for="kq-manual-key">API Key</label>
-        <div class="kq-inline">
-          <input id="kq-manual-key" class="text_pole" type="password" placeholder="sk-..." autocomplete="off" />
-          <div id="kq-toggle-key" class="menu_button fa-solid fa-eye" title="แสดง/ซ่อนคีย์"></div>
-        </div>
-        <small>คีย์จะเก็บไว้ใน settings ของ ST (ไฟล์ settings.json ในเครื่อง) อย่าแชร์ไฟล์นั้นให้คนอื่น</small>
+      <b class="kq-subhead">คีย์ที่กรอกเอง</b>
+      <div id="kq-manual-list" class="kq-manual-list"></div>
+      <div class="kq-row-btns">
+        <div id="kq-add-key" class="menu_button"><i class="fa-solid fa-plus"></i> เพิ่มคีย์</div>
       </div>
+      <small>คีย์ที่กรอกจะเก็บไว้ใน settings ของ ST ในเครื่อง อย่าแชร์ไฟล์ settings.json ให้คนอื่น</small>
 
       <hr class="sysHR" />
       <b>เช็คเมื่อไร</b>
       <label class="checkbox_label" for="kq-auto">
-        <input id="kq-auto" type="checkbox" /><span>เช็คอัตโนมัติหลัง AI ตอบ</span>
+        <input id="kq-auto" type="checkbox" /><span>เช็คคีย์ที่กำลังใช้อัตโนมัติหลัง AI ตอบ</span>
       </label>
       <div class="kq-grid">
         <label for="kq-interval">เว้นอย่างน้อย (วินาที)</label>
         <input id="kq-interval" class="text_pole" type="number" min="5" step="1" />
       </div>
-      <label class="checkbox_label" for="kq-badge-on">
-        <input id="kq-badge-on" type="checkbox" /><span>แสดงยอดเล็กๆ ข้างช่องพิมพ์</span>
+      <label class="checkbox_label" for="kq-wand-on">
+        <input id="kq-wand-on" type="checkbox" /><span>แสดงยอดของคีย์ที่กำลังใช้ในเมนูไม้คทา</span>
       </label>
 
       <hr class="sysHR" />
       <b>เตือนเมื่อใกล้หมด</b>
       <label class="checkbox_label" for="kq-warn">
-        <input id="kq-warn" type="checkbox" /><span>เปิดการเตือน</span>
+        <input id="kq-warn" type="checkbox" /><span>เปิดการเตือน (ทุกคีย์)</span>
       </label>
       <div class="kq-grid">
         <label for="kq-warn-credits">เมื่อยอดเหลือ ≤ (หน่วยที่แสดง)</label>
@@ -80,33 +77,15 @@
             <label for="kq-avg-out">โทเคนขาออกต่อข้อความ (ค่าตั้งต้น)</label>
             <input id="kq-avg-out" class="text_pole" type="number" min="0" step="50" />
             <label for="kq-group">กลุ่มราคาของคีย์ (new-api)</label>
-            <select id="kq-group" class="text_pole"></select>
+            <select id="kq-group" class="text_pole"><option value="">default</option></select>
           </div>
           <label for="kq-prices">ราคากำหนดเอง (บรรทัดละ <code>ชื่อโมเดล = ราคาต่อข้อความ</code> หน่วยเดียวกับที่แสดง)</label>
           <textarea id="kq-prices" class="text_pole" rows="4" placeholder="claude-sonnet-4-5 = 0.05&#10;gemini-2.5-pro = 0.02"></textarea>
+          <small>แพ็กแบบนับจำนวนข้อความ ตั้งได้ในแผงโควตา (กางการ์ดของคีย์นั้น)</small>
           <small id="kq-samples-info"></small>
           <div class="kq-row-btns">
             <div id="kq-clear-samples" class="menu_button"><i class="fa-solid fa-eraser"></i> ล้างค่าที่วัดไว้</div>
           </div>
-        </div>
-      </div>
-
-      <div class="inline-drawer">
-        <div class="inline-drawer-toggle inline-drawer-header">
-          <b>แพ็กแบบรายข้อความ</b>
-          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-        </div>
-        <div class="inline-drawer-content">
-          <label class="checkbox_label" for="kq-pack-on">
-            <input id="kq-pack-on" type="checkbox" /><span>ซื้อแบบนับจำนวนข้อความ (ให้ extension นับเอง)</span>
-          </label>
-          <div class="kq-grid kq-pack-fields">
-            <label for="kq-pack-total">ซื้อมาทั้งหมด (ข้อความ)</label>
-            <input id="kq-pack-total" class="text_pole" type="number" min="0" step="1" />
-            <label for="kq-pack-used">ใช้ไปแล้ว (แก้ได้ถ้าตัวนับเพี้ยน)</label>
-            <input id="kq-pack-used" class="text_pole" type="number" min="0" step="1" />
-          </div>
-          <small>นับทุกครั้งที่ AI ตอบ/swipe ผ่านคีย์นี้ในเครื่องนี้ ถ้าใช้คีย์เดียวกันที่อื่นด้วยจะไม่ถูกนับ</small>
         </div>
       </div>
 

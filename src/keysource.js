@@ -1,8 +1,8 @@
-// หาว่าจะเช็คคีย์ไหน: URL + คีย์ + โมเดลที่ใช้อยู่
+// รวบรวมคีย์ทั้งหมดที่จะเช็ค: การเชื่อมต่อหลัก + ทุก Connection Profile + คีย์ที่กรอกเอง
 import { getContext } from "../../../../extensions.js";
 import { findSecret } from "../../../../secrets.js";
 import { proxies } from "../../../../openai.js";
-import { getSetting } from "./store.js";
+import { getSettings } from "./store.js";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
@@ -19,79 +19,127 @@ export const maskKey = (k) => {
     return k.length <= 8 ? "••••" : `${k.slice(0, 3)}••••${k.slice(-4)}`;
 };
 
-function getProfiles() {
+export const safeHost = (u) => { try { return new URL(u).host; } catch { return String(u || ""); } };
+
+/** FNV-1a — ใช้ทำ id ที่คงที่ของคีย์ โดยไม่เก็บตัวคีย์ลง id */
+export function hashId(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return "k" + (h >>> 0).toString(16);
+}
+
+export function getProfiles() {
     try { return (getContext().extensionSettings.connectionManager || {}).profiles || []; }
     catch { return []; }
 }
 
-// การเชื่อมต่อหลักของ ST ตอนนี้ (ใช้เทียบว่า AI ที่เพิ่งตอบใช้คีย์เดียวกันไหม)
+/** รายละเอียดการเชื่อมต่อหลักของ ST ตอนนี้ (ยังไม่อ่านคีย์) */
 export function describeMainConnection() {
     const ctx = getContext();
     if (ctx.mainApi !== "openai") return null;
     const s = ctx.chatCompletionSettings || {};
     const source = s.chat_completion_source;
-    let url = "";
-    let secretKey = `api_key_${source}`;
-    let proxyPassword = null;
+    let url = "", proxyPassword = null;
     if (source === "custom") url = s.custom_url;
     else if (s.reverse_proxy) { url = s.reverse_proxy; proxyPassword = s.proxy_password || ""; }
     else if (source === "openrouter") url = OPENROUTER_BASE;
     let model = "";
     try { model = ctx.getChatCompletionModel?.() || ""; } catch { /* ignore */ }
-    return { source, url, secretKey, secretId: undefined, proxyPassword, model, label: "API หลักของ ST" };
+    return { origin: "main", label: "การเชื่อมต่อหลัก", source, url, secretKey: `api_key_${source}`, secretId: undefined, proxyPassword, model };
 }
 
-function describeProfile(profileId) {
-    const p = getProfiles().find(x => x?.id === profileId);
-    if (!p) return null;
+function describeProfile(p) {
     const source = p.api || "";
-    let url = "";
-    let proxyPassword = null;
-    const proxyPreset = p.proxy && p.proxy !== "None" ? proxies.find(x => x.name === p.proxy) : null;
+    let url = "", proxyPassword = null;
+    const preset = p.proxy && p.proxy !== "None" ? proxies.find(x => x.name === p.proxy) : null;
     if (source === "custom") url = p["api-url"] || "";
-    else if (proxyPreset?.url) { url = proxyPreset.url; proxyPassword = proxyPreset.password || ""; }
+    else if (preset?.url) { url = preset.url; proxyPassword = preset.password || ""; }
     else if (source === "openrouter") url = OPENROUTER_BASE;
     return {
-        source, url, secretKey: `api_key_${source}`, secretId: p["secret-id"] || undefined,
-        proxyPassword, model: p.model || "", label: `Profile: ${p.name || p.id}`,
+        origin: "profile", profileId: p.id, label: p.name || p.id, source, url,
+        secretKey: `api_key_${source}`, secretId: p["secret-id"] || undefined, proxyPassword, model: p.model || "",
     };
 }
 
-/**
- * คืน { root, key, model, label } หรือ throw Error พร้อมข้อความภาษาไทย
- */
-export async function resolveTarget() {
-    if (getSetting("keySource") === "manual") {
-        const url = getSetting("manualUrl");
-        const key = String(getSetting("manualKey") || "").trim();
-        if (!url || !key) throw new Error("ยังไม่ได้กรอก URL หรือคีย์ในหน้าตั้งค่า");
-        const main = describeMainConnection();
-        return { root: normalizeRoot(url), key, model: main?.model || "", label: "กรอกเอง" };
-    }
-
-    const profileId = getSetting("apiProfile");
-    const d = profileId ? describeProfile(profileId) : describeMainConnection();
-    if (!d) {
-        throw new Error(profileId
-            ? "หา Connection Profile นี้ไม่เจอ (อาจถูกลบไปแล้ว)"
-            : "API หลักของ ST ตอนนี้ไม่ใช่ Chat Completion");
-    }
-    if (!d.url) throw new Error(`${d.label} ไม่ได้ตั้ง URL (ใช้ได้กับ Custom (OpenAI-compatible), Reverse Proxy หรือ OpenRouter)`);
-
-    let key = d.proxyPassword;
-    if (key === null || key === undefined || key === "") {
-        key = await findSecret(d.secretKey, d.secretId);
-    }
-    if (!key) {
-        throw new Error("อ่านคีย์จาก ST ไม่ได้ ต้องตั้ง allowKeysExposure: true ใน config.yaml แล้วรีสตาร์ท ST หรือเปลี่ยนไปใช้แบบ “กรอกเอง”");
-    }
-    return { root: normalizeRoot(d.url), key: String(key).trim(), model: d.model, label: d.label };
+async function readKey(d) {
+    if (d.proxyPassword) return d.proxyPassword;
+    try { return await findSecret(d.secretKey, d.secretId); } catch { return null; }
 }
 
-// ใช้ตัดสินว่า generation ที่เพิ่งเกิดใช้คีย์ที่เรากำลังติดตามไหม
+export const KEY_NOT_EXPOSED = "อ่านคีย์จาก ST ไม่ได้ — ตั้ง allowKeysExposure: true ใน config.yaml แล้วรีสตาร์ท ST หรือกรอกคีย์นี้เองในหน้าตั้งค่า";
+
+/**
+ * คืนรายการเป้าหมาย [{ id, labels[], origins[], root, key, model, error }]
+ * คีย์ที่ซ้ำกัน (URL + คีย์เดียวกัน) จะรวมเป็นอันเดียว
+ */
+export async function listTargets() {
+    const s = getSettings();
+    const raw = [];
+
+    if (s.includeMain) {
+        const d = describeMainConnection();
+        if (d && d.url) raw.push(d);
+    }
+    if (s.includeProfiles) {
+        for (const p of getProfiles()) {
+            if (!p?.id || s.excludedProfiles.includes(p.id)) continue;
+            const d = describeProfile(p);
+            if (d.url) raw.push(d);
+        }
+    }
+    for (const m of s.manualKeys) {
+        if (!m?.url || !m?.key) continue;
+        raw.push({ origin: "manual", manualId: m.id, label: m.label || "กรอกเอง", url: m.url, key: String(m.key).trim(), model: "" });
+    }
+
+    const byId = new Map();
+    const out = [];
+    for (const d of raw) {
+        const root = normalizeRoot(d.url);
+        const key = d.key ?? await readKey(d);
+        if (!key) {
+            out.push({
+                id: `err:${d.origin}:${d.profileId || ""}:${hashId(root)}`, labels: [d.label], origins: [d.origin],
+                root, key: "", model: d.model, error: KEY_NOT_EXPOSED,
+            });
+            continue;
+        }
+        const id = hashId(`${root}|${String(key).trim()}`);
+        const existing = byId.get(id);
+        if (existing) {
+            if (!existing.labels.includes(d.label)) existing.labels.push(d.label);
+            if (!existing.origins.includes(d.origin)) existing.origins.push(d.origin);
+            if (!existing.model && d.model) existing.model = d.model;
+            if (d.origin === "main" && d.model) existing.model = d.model;   // โมเดลที่ใช้อยู่จริงสำคัญกว่า
+            continue;
+        }
+        const t = { id, labels: [d.label], origins: [d.origin], root, key: String(key).trim(), model: d.model || "", error: "" };
+        byId.set(id, t);
+        out.push(t);
+    }
+    // คีย์ที่อ่านไม่ได้ แต่ URL ซ้ำกับคีย์ที่อ่านได้แล้ว → ไม่ต้องโชว์ error ซ้ำ
+    return out.filter(t => !t.error || !out.some(o => !o.error && o.root === t.root));
+}
+
+/** id ของคีย์ที่การเชื่อมต่อหลักใช้อยู่ตอนนี้ */
+export async function resolvePrimaryId(targets) {
+    const d = describeMainConnection();
+    if (!d?.url) return "";
+    const root = normalizeRoot(d.url);
+    const key = await readKey(d);
+    if (key) {
+        const id = hashId(`${root}|${String(key).trim()}`);
+        if (targets.some(t => t.id === id)) return id;
+    }
+    // อ่านคีย์ไม่ได้ → ใช้คีย์แรกที่ URL ตรงกัน
+    return targets.find(t => !t.error && t.root === root)?.id || targets.find(t => t.origins.includes("main"))?.id || "";
+}
+
 export function mainConnectionRoot() {
     const d = describeMainConnection();
     return d?.url ? normalizeRoot(d.url) : "";
 }
 
-export { getProfiles };
+export function mainModel() {
+    return describeMainConnection()?.model || "";
+}

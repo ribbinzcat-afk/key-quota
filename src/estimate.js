@@ -83,7 +83,13 @@ export function pricingPerMessageUsd(p, tin, tout, gr, qpu) {
  * รายการโมเดลพร้อมราคา/ข้อความ และจำนวนข้อความที่เหลือโดยประมาณ
  * source: "วัดจริง" | "กำหนดเอง" | "ตามราคาร้าน" | null
  */
+export function samplesFor(s, root, model) {
+    const a = s.costSamples?.[`${root}::${model}`];
+    return Array.isArray(a) && a.length ? a : [];
+}
+
 export function buildEstimates({ snap, pricing, s, currentModel }) {
+    const root = snap?.root || "";
     const cur = resolveCurrency(snap, s);
     const qpu = snap?.qpu || DEFAULT_QPU;
     const { tin, tout } = avgTokens(s);
@@ -101,15 +107,19 @@ export function buildEstimates({ snap, pricing, s, currentModel }) {
     }
     for (const m of snap?.models || []) if (!limits || limits.has(m)) names.add(m);
     for (const m of manual.keys()) names.add(m);
-    for (const m of Object.keys(s.costSamples || {})) if ((s.costSamples[m] || []).length) names.add(m);
+    const prefix = `${root}::`;
+    for (const k of Object.keys(s.costSamples || {})) {
+        if (k.startsWith(prefix) && (s.costSamples[k] || []).length) names.add(k.slice(prefix.length));
+    }
     if (currentModel) names.add(currentModel);
 
     const remaining = snap?.remainingUsd;
     const rows = [];
     for (const model of names) {
         let perMsg = null, source = null, samples = 0;
-        const measured = median(s.costSamples?.[model]);
-        if (measured && measured > 0) { perMsg = measured; source = "วัดจริง"; samples = s.costSamples[model].length; }
+        const smp = samplesFor(s, root, model);
+        const measured = median(smp);
+        if (measured && measured > 0) { perMsg = measured; source = "วัดจริง"; samples = smp.length; }
         else if (manual.has(model)) {
             perMsg = cur.mode === "quota" ? manual.get(model) / qpu : manual.get(model) / cur.rate;
             source = "กำหนดเอง";

@@ -1,5 +1,6 @@
-// วาดแผงสรุปโควตา + badge ข้างช่องพิมพ์
+// วาดแผงสรุปโควตา (หลายคีย์) + ข้อความสั้นในเมนูไม้คทา
 import { buildEstimates, fmtMoney, fmtQuota, avgTokens } from "./estimate.js";
+import { maskKey, safeHost } from "./keysource.js";
 
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -14,133 +15,194 @@ const KIND_LABEL = {
 function timeAgo(ts) {
     if (!ts) return "";
     const sec = Math.round((Date.now() - ts) / 1000);
-    if (sec < 60) return `${sec} วินาทีที่แล้ว`;
+    if (sec < 60) return `${Math.max(0, sec)} วินาทีที่แล้ว`;
     if (sec < 3600) return `${Math.round(sec / 60)} นาทีที่แล้ว`;
     return new Date(ts).toLocaleString();
 }
+
+const fmtCount = (n) => (n === null || n === undefined) ? "—" : (n >= 100000 ? "100,000+" : `≈ ${n.toLocaleString()}`);
 
 function stat(label, main, sub = "") {
     return `<div class="kq-stat"><div class="kq-stat-label">${esc(label)}</div>
         <div class="kq-stat-main">${esc(main)}</div>${sub ? `<div class="kq-stat-sub">${esc(sub)}</div>` : ""}</div>`;
 }
 
-function fmtCount(n) {
-    if (n === null || n === undefined) return "—";
-    return n >= 100000 ? "100,000+" : `≈ ${n.toLocaleString()}`;
+/** สรุปของคีย์เดียว ใช้ทั้งในการ์ดและเมนูไม้คทา */
+export function summarize(t, r, s, getPack) {
+    const snap = r?.snap || null;
+    const est = buildEstimates({ snap, pricing: r?.pricing, s, currentModel: t.model || "" });
+    const pack = getPack(t.id);
+    const packLeft = pack.enabled ? Math.max(0, (pack.total || 0) - (pack.used || 0)) : null;
+    const row = est.rows.find(x => x.current) || null;
+    let money = "—";
+    if (snap) {
+        if (typeof snap.remainingUsd === "number") money = fmtMoney(snap.remainingUsd, est.cur);
+        else if (snap.unlimited) money = "ไม่จำกัด";
+        else if (snap.kind === "models-only") money = "คีย์ใช้ได้";
+    }
+    const warn = (typeof snap?.remainingUsd === "number" && snap.remainingUsd * est.cur.rate <= (Number(s.warnCredits) || 0))
+        || (row?.messages !== null && row?.messages !== undefined && row.messages <= (Number(s.warnMessages) || 0))
+        || (packLeft !== null && pack.total > 0 && packLeft <= (Number(s.warnMessages) || 0));
+    return { snap, est, row, money, packLeft, pack, warn };
 }
 
-/** state: { snap, pricing, error, busy, target } */
-export function renderPanel($root, state, s) {
-    const { snap, pricing, error, busy, target } = state;
-    const est = buildEstimates({ snap, pricing, s, currentModel: target?.model || "" });
-    const { cur } = est;
+/**
+ * view: { targets, results(Map), primaryId, busyAll, listing, search, listError }
+ */
+export function renderPanel($root, view, s, getPack) {
+    const { targets, results, primaryId, busyAll, listing } = view;
     const tok = avgTokens(s);
+
+    // รวมยอดทุกคีย์ แยกตามหน่วย
+    const totals = new Map();
+    let okCount = 0, errCount = 0;
+    for (const t of targets) {
+        const r = results.get(t.id);
+        if (t.error || r?.error) { errCount++; continue; }
+        if (!r?.snap) continue;
+        okCount++;
+        const sm = summarize(t, r, s, getPack);
+        if (typeof sm.snap.remainingUsd === "number") {
+            const unit = sm.est.cur.mode === "quota" ? "เครดิต" : sm.est.cur.symbol;
+            const cur = totals.get(unit) || { usd: 0, cur: sm.est.cur, n: 0 };
+            cur.usd += sm.snap.remainingUsd; cur.n++;
+            totals.set(unit, cur);
+        }
+    }
 
     let html = `<div class="kq-head">
         <div class="kq-title"><i class="fa-solid fa-coins"></i> Key Quota</div>
-        <div class="kq-meta">${target ? `${esc(target.label)} · <code>${esc(target.masked)}</code> · ${esc(target.host)}` : ""}</div>
         <div class="kq-actions">
-            <div class="menu_button kq-btn" data-kq="check"><i class="fa-solid fa-rotate${busy ? " fa-spin" : ""}"></i> เช็คตอนนี้</div>
+            <div class="menu_button kq-btn" data-kq="check-all"><i class="fa-solid fa-rotate${busyAll ? " fa-spin" : ""}"></i> เช็คทุกคีย์</div>
         </div>
     </div>`;
 
-    if (error) html += `<div class="kq-error"><i class="fa-solid fa-triangle-exclamation"></i> ${esc(error)}</div>`;
+    if (view.listError) html += `<div class="kq-error">${esc(view.listError)}</div>`;
 
-    if (snap) {
-        html += `<div class="kq-sub">ระบบ: ${esc(KIND_LABEL[snap.kind] || snap.kind)}${snap.tokenName ? ` · คีย์ “${esc(snap.tokenName)}”` : ""} · เช็คเมื่อ ${esc(timeAgo(snap.checkedAt))}</div>`;
-        if (snap.note) html += `<div class="kq-note">${esc(snap.note)}</div>`;
-
-        if (snap.unlimited && snap.remainingUsd === null) {
-            html += `<div class="kq-stats">${stat("คงเหลือ", "ไม่จำกัด")}${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, cur), fmtQuota(snap.usedUsd, snap))}</div>`;
-        } else if (snap.remainingUsd !== null && snap.remainingUsd !== undefined) {
-            const pct = snap.totalUsd > 0 ? Math.max(0, Math.min(100, (snap.remainingUsd / snap.totalUsd) * 100)) : null;
-            html += `<div class="kq-stats">
-                ${stat("คงเหลือ", fmtMoney(snap.remainingUsd, cur), fmtQuota(snap.remainingUsd, snap))}
-                ${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, cur), fmtQuota(snap.usedUsd, snap))}
-                ${stat("ทั้งหมด", fmtMoney(snap.totalUsd, cur), fmtQuota(snap.totalUsd, snap))}
-                ${snap.expiresAt ? stat("หมดอายุ", new Date(snap.expiresAt).toLocaleDateString()) : ""}
-            </div>`;
-            if (pct !== null) html += `<div class="kq-bar"><div class="kq-bar-fill ${pct < 15 ? "kq-low" : ""}" style="width:${pct.toFixed(1)}%"></div></div>`;
-        }
-    } else if (!error) {
-        html += `<div class="kq-sub">${busy ? "กำลังเช็ค..." : "ยังไม่ได้เช็ค กด “เช็คตอนนี้”"}</div>`;
+    if (!targets.length) {
+        html += `<div class="kq-note">${listing ? "กำลังรวบรวมคีย์..." : "ยังไม่มีคีย์ให้เช็ค — เพิ่มคีย์ในหน้าตั้งค่า (Extensions → Key Quota Checker) หรือเปิด “เช็คทุก Connection Profile”"}</div>`;
+        $root.html(html);
+        return;
     }
 
-    // แพ็กรายข้อความ
-    if (s.pack?.enabled) {
-        const left = Math.max(0, (s.pack.total || 0) - (s.pack.used || 0));
-        html += `<div class="kq-section"><div class="kq-section-title"><i class="fa-solid fa-message"></i> แพ็กรายข้อความ (นับเองในเครื่อง)</div>
-            <div class="kq-pack">
-                <div class="kq-pack-num"><b>${left.toLocaleString()}</b> / ${(s.pack.total || 0).toLocaleString()} ข้อความ</div>
-                <div class="kq-pack-btns">
-                    <div class="menu_button kq-btn" data-kq="pack-minus" title="ลดตัวนับ 1">−1</div>
-                    <div class="menu_button kq-btn" data-kq="pack-plus" title="เพิ่มตัวนับ 1">+1</div>
-                    <div class="menu_button kq-btn" data-kq="pack-reset" title="เริ่มนับใหม่">รีเซ็ต</div>
-                </div>
-            </div></div>`;
-    }
+    // แถบรวม
+    const totalParts = [...totals.values()].map(v => fmtMoney(v.usd, v.cur));
+    html += `<div class="kq-total">
+        <div><span class="kq-stat-label">คงเหลือรวม</span> <b>${esc(totalParts.join(" + ") || "—")}</b></div>
+        <div class="kq-stat-label">${targets.length} คีย์ · เช็คแล้ว ${okCount}${errCount ? ` · มีปัญหา ${errCount}` : ""}</div>
+    </div>`;
 
-    // ตารางโมเดล
-    const rows = est.rows;
-    html += `<div class="kq-section"><div class="kq-section-title"><i class="fa-solid fa-list"></i> ใช้ได้อีกประมาณกี่ข้อความ</div>
-        <div class="kq-assume">คิดจากข้อความละ ≈ ${tok.tin.toLocaleString()} โทเคนขาเข้า / ${tok.tout.toLocaleString()} โทเคนขาออก
-        ${tok.measured ? `(วัดด้วย tokenizer ของ ST จาก ${tok.n} ครั้งล่าสุด)` : `(ค่าตั้งเอง — ส่งข้อความอีก ${Math.max(0, 3 - tok.n)} ครั้งจะเริ่มใช้ค่าที่วัดจริง)`}
-        ${pricing && est.gr !== 1 ? ` · ตัวคูณกลุ่ม ×${est.gr}` : ""}</div>`;
-
-    if (!rows.length) {
-        html += `<div class="kq-note">ยังไม่มีข้อมูลราคา — ร้านไม่เปิดตารางราคา ให้รอให้ extension วัดจากการใช้จริง หรือกรอกราคาเองในหน้าตั้งค่า</div>`;
-    } else {
-        html += `<input class="text_pole kq-search" type="search" placeholder="ค้นหาโมเดล..." value="${esc(state.search || "")}">
-        <div class="kq-table-wrap"><table class="kq-table">
-            <thead><tr><th>โมเดล</th><th>ต่อข้อความ</th><th>เหลือ</th><th>ที่มา</th></tr></thead><tbody>`;
-        const q = String(state.search || "").toLowerCase();
-        let shown = 0;
-        for (const r of rows) {
-            if (q && !r.model.toLowerCase().includes(q)) continue;
-            if (++shown > 150) break;
-            const low = r.messages !== null && r.messages <= (Number(s.warnMessages) || 0);
-            html += `<tr class="${r.current ? "kq-current" : ""}">
-                <td class="kq-model">${r.current ? `<i class="fa-solid fa-star" title="โมเดลที่ใช้อยู่"></i> ` : ""}${esc(r.model)}</td>
-                <td>${r.perMsgUsd ? esc(fmtMoney(r.perMsgUsd, cur)) : "—"}</td>
-                <td class="${low ? "kq-lowtext" : ""}">${r.perMsgUsd ? esc(fmtCount(r.messages)) : "—"}</td>
-                <td class="kq-src">${esc(r.source || "ไม่มีราคา")}${r.samples ? ` (${r.samples})` : ""}</td>
-            </tr>`;
-        }
-        html += `</tbody></table></div>`;
-    }
-    html += `<div class="kq-foot">ตัวเลขเป็นค่าประมาณ ข้อความยาว/สั้นกว่าปกติ, cache, หรือโหมดคิดเหตุผลทำให้คลาดได้ · “วัดจริง” คือยอดที่ลดลงจริงต่อ 1 ข้อความ (แม่นสุด)</div>`;
+    html += `<div class="kq-cards">`;
+    for (const t of targets) html += renderCard(t, results.get(t.id), s, getPack, t.id === primaryId, view, tok);
+    html += `</div>`;
+    html += `<div class="kq-foot">จำนวนข้อความเป็นค่าประมาณ คิดจากข้อความละ ≈ ${tok.tin.toLocaleString()} / ${tok.tout.toLocaleString()} โทเคน (เข้า/ออก)
+        ${tok.measured ? `วัดด้วย tokenizer ของ ST จาก ${tok.n} ครั้งล่าสุด` : "ค่าตั้งต้น"} · “วัดจริง” = ยอดที่ลดลงจริงต่อ 1 ข้อความ แม่นที่สุด</div>`;
 
     $root.html(html);
-    const $s = $root.find(".kq-search");
-    if (state.focusSearch && $s.length) {
-        const el = $s.get(0); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
+    if (view.focusSearch) {
+        const el = $root.find(`.kq-search[data-id="${view.focusSearch}"]`).get(0);
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
     }
 }
 
-/** ข้อความสั้นๆ สำหรับ badge */
-export function badgeText(state, s) {
-    const { snap, error, target, pricing } = state;
-    if (error && !snap) return { text: "!", title: error, warn: true };
-    const parts = [], title = [];
-    let warn = false;
-    if (s.pack?.enabled) {
-        const left = Math.max(0, (s.pack.total || 0) - (s.pack.used || 0));
-        parts.push(`${left}✉`); title.push(`แพ็ก: เหลือ ${left} ข้อความ`);
-        if (left <= (Number(s.warnMessages) || 0)) warn = true;
-    }
-    if (snap) {
-        const est = buildEstimates({ snap, pricing, s, currentModel: target?.model || "" });
-        if (snap.remainingUsd !== null && snap.remainingUsd !== undefined) {
-            parts.push(fmtMoney(snap.remainingUsd, est.cur)); title.push(`คงเหลือ ${fmtMoney(snap.remainingUsd, est.cur)}`);
-        } else if (snap.unlimited) parts.push("∞");
-        else if (snap.kind === "models-only" && !s.pack?.enabled) parts.push("✓");
-        const curRow = est.rows.find(r => r.current);
-        if (curRow && curRow.messages !== null) {
-            parts.push(`≈${curRow.messages >= 100000 ? "99k+" : curRow.messages}✉`);
-            title.push(`${curRow.model}: เหลือประมาณ ${curRow.messages} ข้อความ`);
-            if (curRow.messages <= (Number(s.warnMessages) || 0)) warn = true;
+function renderCard(t, r, s, getPack, isPrimary, view, tok) {
+    const open = !!s.openCards[t.id];
+    const sm = summarize(t, r, s, getPack);
+    const { snap, est, row, money, packLeft, pack } = sm;
+    const err = t.error || r?.error || "";
+    const labels = t.labels.join(" · ");
+    const pct = snap && snap.totalUsd > 0 && typeof snap.remainingUsd === "number"
+        ? Math.max(0, Math.min(100, (snap.remainingUsd / snap.totalUsd) * 100)) : null;
+
+    let msgLine = "";
+    if (row && row.messages !== null) msgLine = `${fmtCount(row.messages)} ข้อความ <span class="kq-dim">(${esc(row.model)})</span>`;
+    else if (t.model) msgLine = `<span class="kq-dim">${esc(t.model)}: ยังไม่มีราคา</span>`;
+    if (packLeft !== null) msgLine += `${msgLine ? " · " : ""}แพ็กเหลือ <b>${packLeft.toLocaleString()}</b>/${(pack.total || 0).toLocaleString()}`;
+
+    let html = `<div class="kq-card${isPrimary ? " kq-primary" : ""}${sm.warn ? " kq-warncard" : ""}" data-id="${esc(t.id)}">
+      <div class="kq-card-head" data-kq="toggle" data-id="${esc(t.id)}">
+        <div class="kq-card-name">
+            ${isPrimary ? `<i class="fa-solid fa-star" title="คีย์ที่กำลังใช้แชทอยู่"></i> ` : ""}<b>${esc(labels)}</b>
+            <div class="kq-dim">${esc(safeHost(t.root))} · <code>${esc(t.key ? maskKey(t.key) : "—")}</code></div>
+        </div>
+        <div class="kq-card-val">
+            <div class="kq-card-money">${r?.busy ? `<i class="fa-solid fa-spinner fa-spin"></i>` : esc(err && !snap ? "!" : money)}</div>
+            ${msgLine ? `<div class="kq-card-msgs">${msgLine}</div>` : ""}
+        </div>
+        <i class="fa-solid fa-chevron-${open ? "up" : "down"} kq-chev"></i>
+      </div>`;
+    if (pct !== null) html += `<div class="kq-bar"><div class="kq-bar-fill ${pct < 15 ? "kq-low" : ""}" style="width:${pct.toFixed(1)}%"></div></div>`;
+    if (err) html += `<div class="kq-error">${esc(err)}</div>`;
+
+    if (open) {
+        html += `<div class="kq-card-body">`;
+        html += `<div class="kq-row">
+            <div class="kq-sub">${snap ? `${esc(KIND_LABEL[snap.kind] || snap.kind)}${snap.tokenName ? ` · “${esc(snap.tokenName)}”` : ""} · เช็คเมื่อ ${esc(timeAgo(snap.checkedAt))}` : "ยังไม่ได้เช็ค"}</div>
+            ${t.error ? "" : `<div class="menu_button kq-btn" data-kq="check-one" data-id="${esc(t.id)}"><i class="fa-solid fa-rotate"></i> เช็คคีย์นี้</div>`}
+        </div>`;
+        if (snap?.note) html += `<div class="kq-note">${esc(snap.note)}</div>`;
+        if (snap && typeof snap.remainingUsd === "number") {
+            html += `<div class="kq-stats">
+                ${stat("คงเหลือ", fmtMoney(snap.remainingUsd, est.cur), fmtQuota(snap.remainingUsd, snap))}
+                ${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, est.cur), fmtQuota(snap.usedUsd, snap))}
+                ${stat("ทั้งหมด", fmtMoney(snap.totalUsd, est.cur), fmtQuota(snap.totalUsd, snap))}
+                ${snap.expiresAt ? stat("หมดอายุ", new Date(snap.expiresAt).toLocaleDateString()) : ""}
+            </div>`;
+        } else if (snap?.unlimited) {
+            html += `<div class="kq-stats">${stat("คงเหลือ", "ไม่จำกัด")}${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, est.cur), fmtQuota(snap.usedUsd, snap))}</div>`;
         }
+
+        // แพ็กรายข้อความของคีย์นี้
+        if (!t.error) {
+            html += `<div class="kq-pack">
+                <label class="checkbox_label"><input type="checkbox" data-kq="pack-on" data-id="${esc(t.id)}" ${pack.enabled ? "checked" : ""}/><span>ซื้อแบบนับข้อความ</span></label>
+                ${pack.enabled ? `
+                <div class="kq-pack-ctrl">
+                    <span>ซื้อมา</span><input type="number" min="0" class="text_pole kq-num" data-kq="pack-total" data-id="${esc(t.id)}" value="${esc(pack.total || 0)}">
+                    <span>ใช้ไป</span><input type="number" min="0" class="text_pole kq-num" data-kq="pack-used" data-id="${esc(t.id)}" value="${esc(pack.used || 0)}">
+                    <div class="menu_button kq-btn" data-kq="pack-minus" data-id="${esc(t.id)}">−1</div>
+                    <div class="menu_button kq-btn" data-kq="pack-plus" data-id="${esc(t.id)}">+1</div>
+                </div>` : ""}
+            </div>`;
+        }
+
+        // ตารางโมเดล
+        const rows = est.rows;
+        if (rows.length) {
+            const q = String(view.search?.[t.id] || "").toLowerCase();
+            html += `<input class="text_pole kq-search" type="search" data-id="${esc(t.id)}" placeholder="ค้นหาโมเดล..." value="${esc(view.search?.[t.id] || "")}">
+            <div class="kq-table-wrap"><table class="kq-table">
+            <thead><tr><th>โมเดล</th><th>ต่อข้อความ</th><th>เหลือ</th><th>ที่มา</th></tr></thead><tbody>`;
+            let shown = 0;
+            for (const x of rows) {
+                if (q && !x.model.toLowerCase().includes(q)) continue;
+                if (++shown > 150) break;
+                const low = x.messages !== null && x.messages <= (Number(s.warnMessages) || 0);
+                html += `<tr class="${x.current ? "kq-current" : ""}">
+                    <td>${x.current ? `<i class="fa-solid fa-star"></i> ` : ""}${esc(x.model)}</td>
+                    <td>${x.perMsgUsd ? esc(fmtMoney(x.perMsgUsd, est.cur)) : "—"}</td>
+                    <td class="${low ? "kq-lowtext" : ""}">${x.perMsgUsd ? esc(fmtCount(x.messages)) : "—"}</td>
+                    <td class="kq-src">${esc(x.source || "ไม่มีราคา")}${x.samples ? ` (${x.samples})` : ""}</td></tr>`;
+            }
+            html += `</tbody></table></div>`;
+        } else if (snap) {
+            html += `<div class="kq-note">ร้านนี้ไม่เปิดตารางราคา — ส่งข้อความด้วยคีย์นี้สักครั้ง extension จะวัดราคาจริงให้ หรือกรอกราคาเองในหน้าตั้งค่า</div>`;
+        }
+        html += `</div>`;
     }
-    if (error) { title.push(`เช็คล่าสุดล้มเหลว: ${error}`); }
-    return { text: parts.join(" · ") || "—", title: title.join("\n") || "Key Quota", warn };
+    html += `</div>`;
+    return html;
+}
+
+/** ข้อความสั้นใต้ปุ่มในเมนูไม้คทา (เฉพาะคีย์ที่กำลังใช้) */
+export function wandText(t, r, s, getPack, count) {
+    if (!t) return { text: count ? `${count} คีย์` : "", warn: false, title: "" };
+    const sm = summarize(t, r, s, getPack);
+    const parts = [];
+    if (r?.error && !sm.snap) return { text: "เช็คไม่ได้", warn: true, title: r.error };
+    if (sm.snap) parts.push(sm.money);
+    if (sm.row && sm.row.messages !== null) parts.push(`≈${sm.row.messages >= 100000 ? "99k+" : sm.row.messages.toLocaleString()} ข้อความ`);
+    if (sm.packLeft !== null) parts.push(`แพ็ก ${sm.packLeft}`);
+    if (count > 1) parts.push(`+${count - 1} คีย์`);
+    return { text: parts.join(" · "), warn: sm.warn, title: t.labels.join(" · ") };
 }
