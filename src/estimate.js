@@ -95,7 +95,7 @@ export function buildEstimates({ snap, pricing, s, currentModel }) {
         const rows = snap.messageModels.map(m => ({
             model: m.model, perMsgUsd: null, source: "ร้านบอก", samples: 0,
             messages: Math.max(0, Math.floor(m.remaining)), used: m.used, total: m.total,
-            current: modelMatches(m.model, currentModel),
+            current: modelMatches(m.model, currentModel) || (m.id && modelMatches(m.id, currentModel)),
         }));
         rows.sort((a, b) => (b.current - a.current) || a.model.localeCompare(b.model));
         return { rows, cur, tin: 0, tout: 0, gr: 1, storeCounted: true };
@@ -149,10 +149,10 @@ export function buildEstimates({ snap, pricing, s, currentModel }) {
     return { rows, cur, tin, tout, gr };
 }
 
-/** ชื่อโมเดลใน ST อาจไม่มีคำนำหน้า [星一] แบบที่ร้านใช้ */
+/** ชื่อโมเดลใน ST อาจไม่มีคำนำหน้า [星一] / [GZ]-[官转] แบบที่ร้านใช้ */
 export function modelMatches(storeModel, current) {
-    if (!current) return false;
+    if (!current || !storeModel) return false;
     if (storeModel === current) return true;
-    const strip = (x) => String(x).replace(/^\[[^\]]*\]\s*/, "").toLowerCase();
-    return String(current).startsWith("[") ? false : strip(storeModel) === strip(current);
+    const strip = (x) => String(x).replace(/^(\s*\[[^\]]*\]\s*-?\s*)+/, "").trim().toLowerCase();
+    return strip(storeModel) === strip(current) && strip(current) !== "";
 }

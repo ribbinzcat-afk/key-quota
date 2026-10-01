@@ -240,7 +240,8 @@ async function checkPopko(root, key, cfg) {
         throw new Error(`หน้าเช็คของ POPKO ตอบผิดปกติ: ${j?.detail || j?.error || j?.message || `HTTP ${res?.status}`}`);
     }
     const messageModels = j.models.map(m => ({
-        model: String(m.id || m.label || ""),
+        model: String(m.label || m.id || ""),     // label คือชื่อที่คนอ่านเข้าใจ (id บางร้านเป็นรหัสเช่น xia-01)
+        id: String(m.id || ""),
         remaining: Number(m.remaining), used: Number(m.used_messages), total: Number(m.total),
     })).filter(m => m.model && isFinite(m.remaining));
     const summary = j.history?.summary || {};
