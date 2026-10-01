@@ -89,11 +89,22 @@ export function samplesFor(s, root, model) {
 }
 
 export function buildEstimates({ snap, pricing, s, currentModel }) {
+    // ร้านบอกจำนวนข้อความมาเอง → ใช้ตามนั้นเลย
+    if (Array.isArray(snap?.messageModels)) {
+        const cur = resolveCurrency(null, s);
+        const rows = snap.messageModels.map(m => ({
+            model: m.model, perMsgUsd: null, source: "ร้านบอก", samples: 0,
+            messages: Math.max(0, Math.floor(m.remaining)), used: m.used, total: m.total,
+            current: modelMatches(m.model, currentModel),
+        }));
+        rows.sort((a, b) => (b.current - a.current) || a.model.localeCompare(b.model));
+        return { rows, cur, tin: 0, tout: 0, gr: 1, storeCounted: true };
+    }
     const root = snap?.root || "";
     const cur = resolveCurrency(snap, s);
     const qpu = snap?.qpu || DEFAULT_QPU;
     const { tin, tout } = avgTokens(s);
-    const gr = groupRatioOf(pricing, s.group);
+    const gr = groupRatioOf(pricing, s.group || snap?.group || "");
     const manual = parseManualPrices(s.manualPrices);
     const limits = snap?.modelLimits && snap.modelLimits.length ? new Set(snap.modelLimits) : null;
 
@@ -101,7 +112,7 @@ export function buildEstimates({ snap, pricing, s, currentModel }) {
     const names = new Set();
     for (const p of pricing?.models || []) {
         if (limits && !limits.has(p.model)) continue;
-        const g = s.group || "default";
+        const g = s.group || snap?.group || "default";
         if (p.groups && p.groups.length && !p.groups.includes(g) && !p.groups.includes("all")) continue;
         names.add(p.model);
     }
@@ -136,4 +147,12 @@ export function buildEstimates({ snap, pricing, s, currentModel }) {
         ((b.perMsgUsd !== null) - (a.perMsgUsd !== null)) ||
         a.model.localeCompare(b.model));
     return { rows, cur, tin, tout, gr };
+}
+
+/** ชื่อโมเดลใน ST อาจไม่มีคำนำหน้า [星一] แบบที่ร้านใช้ */
+export function modelMatches(storeModel, current) {
+    if (!current) return false;
+    if (storeModel === current) return true;
+    const strip = (x) => String(x).replace(/^\[[^\]]*\]\s*/, "").toLowerCase();
+    return String(current).startsWith("[") ? false : strip(storeModel) === strip(current);
 }

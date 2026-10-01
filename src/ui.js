@@ -1,12 +1,16 @@
 // วาดแผงสรุปโควตา (หลายคีย์) + ข้อความสั้นในเมนูไม้คทา
 import { buildEstimates, fmtMoney, fmtQuota, avgTokens } from "./estimate.js";
 import { maskKey, safeHost } from "./keysource.js";
+import { STORE_CHECKERS, autoChecker, RVL_SERIES, rvlChannelOf } from "./quota.js";
 
 export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const KIND_LABEL = {
     "new-api": "new-api (ยอดของคีย์)",
-    "new-api (บัญชี)": "new-api (ยอดของบัญชี)",
+    "new-api (บัญชี)": "new-api (ยอดของบัญชีที่ออกคีย์)",
+    "new-api (UID)": "new-api (ยอดของ UID ของคุณ)",
+    "store-popko": "หน้าเช็คของร้าน POPKO",
+    "store-rvl": "หน้าเช็คของร้าน RVL Connect",
     "billing": "one-api / OpenAI billing",
     "openrouter": "OpenRouter",
     "models-only": "ไม่มี endpoint เช็คยอด",
@@ -39,6 +43,8 @@ export function summarize(t, r, s, getPack) {
         if (typeof snap.remainingUsd === "number") money = fmtMoney(snap.remainingUsd, est.cur);
         else if (snap.unlimited) money = "ไม่จำกัด";
         else if (snap.kind === "models-only") money = "คีย์ใช้ได้";
+        else if (est.storeCounted) money = row ? `${row.messages.toLocaleString()} ข้อความ` : `${est.rows.length} โมเดล`;
+        else if (snap.kind === "store-rvl") money = "คีย์ใช้ได้";
     }
     const warn = (typeof snap?.remainingUsd === "number" && snap.remainingUsd * est.cur.rate <= (Number(s.warnCredits) || 0))
         || (row?.messages !== null && row?.messages !== undefined && row.messages <= (Number(s.warnMessages) || 0))
@@ -115,7 +121,7 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
         ? Math.max(0, Math.min(100, (snap.remainingUsd / snap.totalUsd) * 100)) : null;
 
     let msgLine = "";
-    if (row && row.messages !== null) msgLine = `${fmtCount(row.messages)} ข้อความ <span class="kq-dim">(${esc(row.model)})</span>`;
+    if (row && row.messages !== null) msgLine = est.storeCounted ? `<span class="kq-dim">${esc(row.model)}</span>` : `${fmtCount(row.messages)} ข้อความ <span class="kq-dim">(${esc(row.model)})</span>`;
     else if (t.model) msgLine = `<span class="kq-dim">${esc(t.model)}: ยังไม่มีราคา</span>`;
     if (packLeft !== null) msgLine += `${msgLine ? " · " : ""}แพ็กเหลือ <b>${packLeft.toLocaleString()}</b>/${(pack.total || 0).toLocaleString()}`;
 
@@ -128,6 +134,8 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
         <div class="kq-card-val">
             <div class="kq-card-money">${r?.busy ? `<i class="fa-solid fa-spinner fa-spin"></i>` : esc(err && !snap ? "!" : money)}</div>
             ${msgLine ? `<div class="kq-card-msgs">${msgLine}</div>` : ""}
+            ${snap?.shared ? `<div class="kq-card-msgs kq-lowtext" title="ยอดของบัญชีที่ออกคีย์ อาจรวมของคนอื่น">ยอดบัญชี (อาจรวมคนอื่น)</div>` : ""}
+            ${snap?.uidOk ? `<div class="kq-card-msgs kq-dim">ยอดของ UID</div>` : ""}
         </div>
         <i class="fa-solid fa-chevron-${open ? "up" : "down"} kq-chev"></i>
       </div>`;
@@ -147,9 +155,44 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
                 ${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, est.cur), fmtQuota(snap.usedUsd, snap))}
                 ${stat("ทั้งหมด", fmtMoney(snap.totalUsd, est.cur), fmtQuota(snap.totalUsd, snap))}
                 ${snap.expiresAt ? stat("หมดอายุ", new Date(snap.expiresAt).toLocaleDateString()) : ""}
+                ${snap.requestCount ? stat("ส่งไปแล้ว", `${snap.requestCount.toLocaleString()} ครั้ง`) : ""}
+                ${snap.group ? stat("กลุ่มราคา", snap.group) : ""}
             </div>`;
         } else if (snap?.unlimited) {
             html += `<div class="kq-stats">${stat("คงเหลือ", "ไม่จำกัด")}${stat("ใช้ไปแล้ว", fmtMoney(snap.usedUsd, est.cur), fmtQuota(snap.usedUsd, snap))}</div>`;
+        }
+
+        // หน้าเช็คของร้าน
+        if (!t.error) {
+            const ck = s.checkers?.[t.id] || autoChecker(t.root, t.labels) || {};
+            const opts = [`<option value="">${autoChecker(t.root, t.labels) ? "อัตโนมัติ" : "วิธีมาตรฐาน (new-api / one-api)"}</option>`,
+                `<option value="standard" ${ck.type === "standard" ? "selected" : ""}>วิธีมาตรฐาน (new-api / one-api)</option>`]
+                .concat(Object.entries(STORE_CHECKERS).map(([k, v]) => `<option value="${esc(k)}" ${ck.type === k && !ck.auto ? "selected" : ""}>${esc(v.label)}</option>`));
+            if (ck.auto) opts[0] = `<option value="" selected>อัตโนมัติ: ${esc(STORE_CHECKERS[ck.type]?.label || ck.type)}${ck.byName ? " (จากชื่อ)" : ""}</option>`;
+            html += `<div class="kq-uid">
+                <div class="kq-section-title"><i class="fa-solid fa-store"></i> วิธีเช็คยอด</div>
+                <div class="kq-uid-row">
+                    <select class="text_pole" data-kq="checker" data-id="${esc(t.id)}">${opts.join("")}</select>
+                    ${ck.type === "popko" ? `<input type="text" class="text_pole" data-kq="checker-provider" data-field="provider" data-id="${esc(t.id)}" placeholder="provider${s.lastPopkoProvider ? ` (ใช้ ${esc(s.lastPopkoProvider)})` : " เช่น xing"}" value="${esc(ck.provider || "")}">` : ""}
+                    ${ck.type === "rvl" && !rvlChannelOf(t.root) ? `<input type="number" min="1" class="text_pole" data-kq="checker-provider" data-field="channel" data-id="${esc(t.id)}" placeholder="channel เช่น 8" value="${esc(ck.channel || "")}">` : ""}
+                    ${ck.type === "rvl" ? `<input type="text" class="text_pole" data-kq="checker-provider" data-field="series" data-id="${esc(t.id)}" placeholder="series (อัตโนมัติ: ${esc(RVL_SERIES[Number(ck.channel) || rvlChannelOf(t.root)] || "?")})" value="${esc(ck.series || "")}">` : ""}
+                </div>
+                <small class="kq-dim">ถ้าร้านมีหน้าเช็คยอดของตัวเอง เลือกที่นี่จะได้ยอดของคีย์คุณจริงๆ (ไม่ใช่ยอดรวม)</small>
+            </div>`;
+        }
+
+        // UID ของบัญชี (ยอดของตัวเอง)
+        if (!t.error && !(s.checkers?.[t.id]?.type && s.checkers[t.id].type !== "standard") && !(!s.checkers?.[t.id] && autoChecker(t.root, t.labels))) {
+            const ua = s.userAuth?.[t.id] || {};
+            html += `<div class="kq-uid">
+                <div class="kq-section-title"><i class="fa-solid fa-id-badge"></i> ยอดของบัญชีตัวเอง (UID)</div>
+                <div class="kq-uid-row">
+                    <input type="text" inputmode="numeric" class="text_pole" data-kq="uid" data-id="${esc(t.id)}" placeholder="UID เช่น 1234" value="${esc(ua.uid || "")}">
+                    <input type="password" class="text_pole" data-kq="uid-token" data-id="${esc(t.id)}" placeholder="Access Token (ถ้ามี)" autocomplete="off" value="${esc(ua.token || "")}">
+                    <div class="menu_button kq-btn fa-solid fa-eye" data-kq="uid-show" data-id="${esc(t.id)}" title="แสดง/ซ่อน"></div>
+                </div>
+                <small class="kq-dim">ใส่ UID ที่ร้านให้มา ถ้าร้านไม่ยอมรับ sk-key ให้ใส่ Access Token ของบัญชีด้วย (บนเว็บร้าน: ตั้งค่าส่วนตัว → 系统访问令牌 / Access Token)</small>
+            </div>`;
         }
 
         // แพ็กรายข้อความของคีย์นี้
@@ -172,7 +215,7 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
             const q = String(view.search?.[t.id] || "").toLowerCase();
             html += `<input class="text_pole kq-search" type="search" data-id="${esc(t.id)}" placeholder="ค้นหาโมเดล..." value="${esc(view.search?.[t.id] || "")}">
             <div class="kq-table-wrap"><table class="kq-table">
-            <thead><tr><th>โมเดล</th><th>ต่อข้อความ</th><th>เหลือ</th><th>ที่มา</th></tr></thead><tbody>`;
+            <thead><tr><th>โมเดล</th><th>ต่อข้อความ</th><th>${est.storeCounted ? "เหลือ / ทั้งหมด" : "เหลือ"}</th><th>ที่มา</th></tr></thead><tbody>`;
             let shown = 0;
             for (const x of rows) {
                 if (q && !x.model.toLowerCase().includes(q)) continue;
@@ -181,7 +224,7 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
                 html += `<tr class="${x.current ? "kq-current" : ""}">
                     <td>${x.current ? `<i class="fa-solid fa-star"></i> ` : ""}${esc(x.model)}</td>
                     <td>${x.perMsgUsd ? esc(fmtMoney(x.perMsgUsd, est.cur)) : "—"}</td>
-                    <td class="${low ? "kq-lowtext" : ""}">${x.perMsgUsd ? esc(fmtCount(x.messages)) : "—"}</td>
+                    <td class="${low ? "kq-lowtext" : ""}">${x.messages !== null && x.messages !== undefined ? esc(est.storeCounted ? `${x.messages.toLocaleString()} / ${(x.total ?? "?").toLocaleString()}` : fmtCount(x.messages)) : "—"}</td>
                     <td class="kq-src">${esc(x.source || "ไม่มีราคา")}${x.samples ? ` (${x.samples})` : ""}</td></tr>`;
             }
             html += `</tbody></table></div>`;
@@ -201,7 +244,7 @@ export function wandText(t, r, s, getPack, count) {
     const parts = [];
     if (r?.error && !sm.snap) return { text: "เช็คไม่ได้", warn: true, title: r.error };
     if (sm.snap) parts.push(sm.money);
-    if (sm.row && sm.row.messages !== null) parts.push(`≈${sm.row.messages >= 100000 ? "99k+" : sm.row.messages.toLocaleString()} ข้อความ`);
+    if (sm.row && sm.row.messages !== null && !sm.est.storeCounted) parts.push(`≈${sm.row.messages >= 100000 ? "99k+" : sm.row.messages.toLocaleString()} ข้อความ`);
     if (sm.packLeft !== null) parts.push(`แพ็ก ${sm.packLeft}`);
     if (count > 1) parts.push(`+${count - 1} คีย์`);
     return { text: parts.join(" · "), warn: sm.warn, title: t.labels.join(" · ") };

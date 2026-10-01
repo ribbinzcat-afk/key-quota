@@ -94,3 +94,8 @@
     .kq-panel .kq-table th:nth-child(4), .kq-panel .kq-table td:nth-child(4) { display: none; }
     .kq-panel .kq-table-wrap { max-height: 55dvh; }
 }
+
+.kq-panel .kq-uid { display: flex; flex-direction: column; gap: 4px; }
+.kq-panel .kq-uid-row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.kq-panel .kq-uid-row .text_pole { flex: 1 1 8em; min-width: 0; margin: 0; min-height: 32px; }
+.kq-panel .kq-uid-row .menu_button { min-width: 32px; justify-content: center; }

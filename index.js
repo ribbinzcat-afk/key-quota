@@ -1,7 +1,7 @@
 import { getContext } from "../../../extensions.js";
 import { extensionName, extensionFolderPath, getSettings, getSetting, setSetting, saveSettings, newId, getPack, setPack } from "./src/store.js";
 import { listTargets, resolvePrimaryId, mainConnectionRoot, mainModel, getProfiles } from "./src/keysource.js";
-import { checkQuota, fetchPricing } from "./src/quota.js";
+import { checkQuota, fetchPricing, autoChecker } from "./src/quota.js";
 import { renderPanel, wandText, summarize, esc } from "./src/ui.js";
 
 const MAX_TOKEN_SAMPLES = 20;
@@ -73,6 +73,13 @@ async function refreshTargets(force = false) {
 const primaryTarget = () => state.targets.find(t => t.id === state.primaryId) || null;
 
 /* ---------------- เช็คยอด ---------------- */
+// provider ของ POPKO ที่เคยกรอก ใช้ซ้ำกับคีย์ POPKO อื่นที่ยังไม่ได้ใส่
+function withDefaults(ck, s) {
+    if (!ck) return null;
+    if (ck.type === "popko" && !ck.provider && s.lastPopkoProvider) return { ...ck, defaultProvider: s.lastPopkoProvider };
+    return ck;
+}
+
 async function getPricing(root, key) {
     if (/openrouter\.ai/i.test(root)) return null;
     const c = state.pricingCache.get(root);
@@ -90,7 +97,12 @@ async function checkOne(t, { silent = true } = {}) {
     r.busy = true; state.results.set(t.id, r); refreshUi();
     const prev = r.snap;
     try {
-        const snap = await checkQuota(t.root, t.key, { qpuOverride: Number(s.quotaPerUnit) || 0 });
+        const ua = s.userAuth[t.id] || {};
+        const snap = await checkQuota(t.root, t.key, {
+            qpuOverride: Number(s.quotaPerUnit) || 0,
+            uid: String(ua.uid || "").trim(), accessToken: String(ua.token || "").trim(),
+            checker: withDefaults(s.checkers[t.id] || autoChecker(t.root, t.labels), s),
+        });
         r.pricing = await getPricing(t.root, t.key);
 
         // วัดราคาจริง: คีย์ที่กำลังใช้, AI ตอบ 1 ครั้งพอดีระหว่างการเช็ค 2 ครั้ง
@@ -181,6 +193,9 @@ function evaluateWarnings() {
 /* ---------------- UI ---------------- */
 function refreshUi() {
     const s = getSettings();
+    // โมเดลของคีย์ที่กำลังใช้ = โมเดลที่เลือกอยู่ใน ST ตอนนี้
+    const pt = primaryTarget();
+    if (pt) { const m = mainModel(); if (m) pt.model = m; }
     // ข้อความใต้ปุ่มในไม้คทา
     const $sub = $("#kq-menu-button .kq-wand-sub");
     if (s.enabled && s.showInWand) {
@@ -215,6 +230,11 @@ async function openPanel() {
         const id = String($(this).data("id") || "");
         const s = getSettings();
         if (act === "check-all") return checkAll();
+        if (act === "uid-show") {
+            const $i = $(this).closest(".kq-uid").find('input[data-kq="uid-token"]');
+            $i.attr("type", $i.attr("type") === "password" ? "text" : "password");
+            return;
+        }
         if (act === "check-one") { ev.stopPropagation(); return checkOne(state.targets.find(t => t.id === id), { silent: false }); }
         if (act === "toggle") {
             if ($(ev.target).closest("input, .menu_button, label").length) return;
@@ -228,6 +248,37 @@ async function openPanel() {
         const act = $(this).data("kq");
         const id = String($(this).data("id") || "");
         const n = Math.max(0, Math.round(parseFloat(this.value) || 0));
+        if (act === "checker" || act === "checker-provider") {
+            const s = getSettings();
+            if (act === "checker") {
+                if (this.value) s.checkers[id] = { ...(s.checkers[id] || {}), type: this.value };
+                else delete s.checkers[id];
+            } else {
+                const t0 = state.targets.find(t => t.id === id);
+                const ck = s.checkers[id] || (s.checkers[id] = { ...(autoChecker(t0?.root, t0?.labels) || {}) });
+                delete ck.auto;
+                const field = $(this).data("field") || "provider";
+                ck[field] = String(this.value || "").trim();
+                if (ck.type === "popko" && field === "provider" && ck[field]) s.lastPopkoProvider = ck[field];
+            }
+            saveSettings();
+            const r = state.results.get(id); if (r) { r.snap = null; r.error = ""; }
+            refreshUi();
+            const ck = s.checkers[id];
+            if (ck && ck.type === "popko" && act === "checker" && !ck.provider && s.lastPopkoProvider) ck.provider = s.lastPopkoProvider;
+            if (!ck || ck.type !== "popko" || ck.provider) checkOne(state.targets.find(t => t.id === id), { silent: false });
+            return;
+        }
+        if (act === "uid" || act === "uid-token") {
+            const s = getSettings();
+            const ua = s.userAuth[id] || (s.userAuth[id] = { uid: "", token: "" });
+            if (act === "uid") ua.uid = String(this.value || "").trim();
+            else ua.token = String(this.value || "").trim();
+            if (!ua.uid && !ua.token) delete s.userAuth[id];
+            saveSettings();
+            const r = state.results.get(id); if (r) r.snap = null;   // ยอดเดิมคนละระดับ ไม่ใช้วัดราคาต่อ
+            return checkOne(state.targets.find(t => t.id === id), { silent: false });
+        }
         if (act === "pack-on") setPack(id, { enabled: this.checked });
         else if (act === "pack-total") setPack(id, { total: n });
         else if (act === "pack-used") setPack(id, { used: n });

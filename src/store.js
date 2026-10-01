@@ -40,6 +40,8 @@ export const defaultSettings = {
 
     packs: {},                 // targetId -> { enabled, total, used }
     openCards: {},             // targetId -> true (การ์ดที่กางไว้ในแผง)
+    userAuth: {},              // targetId -> { uid, token } ใช้เช็คยอดของบัญชีตัวเอง
+    checkers: {},              // targetId -> { type: "popko", provider } หน้าเช็คของร้าน
 };
 
 let migrated = false;
@@ -56,6 +58,8 @@ export function getSettings() {
     if (!Array.isArray(s.excludedProfiles)) s.excludedProfiles = [];
     if (!s.packs || typeof s.packs !== "object") s.packs = {};
     if (!s.openCards || typeof s.openCards !== "object") s.openCards = {};
+    if (!s.userAuth || typeof s.userAuth !== "object") s.userAuth = {};
+    if (!s.checkers || typeof s.checkers !== "object") s.checkers = {};
 
     // ย้ายค่าจากเวอร์ชัน 1.0 (คีย์เดียว)
     if (!migrated) {
