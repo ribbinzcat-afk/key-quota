@@ -1,7 +1,7 @@
 import { getContext } from "../../../extensions.js";
 import { extensionName, extensionFolderPath, getSettings, getSetting, setSetting, saveSettings, newId, getPack, setPack } from "./src/store.js";
 import { listTargets, resolvePrimaryId, mainConnectionRoot, mainModel, getProfiles } from "./src/keysource.js";
-import { checkQuota, fetchPricing, autoChecker } from "./src/quota.js";
+import { checkQuota, fetchPricing, autoChecker, isRvlShop } from "./src/quota.js";
 import { renderPanel, wandText, summarize, esc } from "./src/ui.js";
 
 const MAX_TOKEN_SAMPLES = 20;
@@ -57,6 +57,11 @@ async function refreshTargets(force = false) {
                 setPack(state.primaryId, s.legacyPack); delete s.legacyPack; saveSettings();
             }
             if (state.primaryId && s.openCards[state.primaryId] === undefined) s.openCards[state.primaryId] = true;
+            // คีย์ของ shop.rvlconnect.com ที่เคยถูกตั้งเป็นหน้าเช็คของ RVL ตัวเก่า → กลับไปใช้วิธีมาตรฐาน
+            for (const t of targets) {
+                const ck = s.checkers[t.id];
+                if (ck?.type === "rvl" && isRvlShop(t.root) && !ck.channel) { delete s.checkers[t.id]; saveSettings(); }
+            }
         } catch (e) {
             console.warn(`[${extensionName}] รวบรวมคีย์ไม่สำเร็จ:`, e);
             state.listError = e?.message || String(e);

@@ -165,10 +165,14 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
         // หน้าเช็คของร้าน
         if (!t.error) {
             const ck = s.checkers?.[t.id] || autoChecker(t.root, t.labels) || {};
-            const opts = [`<option value="">${autoChecker(t.root, t.labels) ? "อัตโนมัติ" : "วิธีมาตรฐาน (new-api / one-api)"}</option>`,
-                `<option value="standard" ${ck.type === "standard" ? "selected" : ""}>วิธีมาตรฐาน (new-api / one-api)</option>`]
-                .concat(Object.entries(STORE_CHECKERS).map(([k, v]) => `<option value="${esc(k)}" ${ck.type === k && !ck.auto ? "selected" : ""}>${esc(v.label)}</option>`));
-            if (ck.auto) opts[0] = `<option value="" selected>อัตโนมัติ: ${esc(STORE_CHECKERS[ck.type]?.label || ck.type)}${ck.byName ? " (จากชื่อ)" : ""}</option>`;
+            const auto = autoChecker(t.root, t.labels);
+            const opts = auto
+                ? [`<option value="" ${ck.auto ? "selected" : ""}>อัตโนมัติ: ${esc(STORE_CHECKERS[auto.type]?.label || auto.type)}${auto.byName ? " (จากชื่อ)" : ""}</option>`,
+                   `<option value="standard" ${ck.type === "standard" ? "selected" : ""}>วิธีมาตรฐาน (new-api / one-api)</option>`]
+                : [`<option value="" ${!ck.type || ck.type === "standard" ? "selected" : ""}>วิธีมาตรฐาน (new-api / one-api)</option>`];
+            for (const [k, v] of Object.entries(STORE_CHECKERS)) {
+                opts.push(`<option value="${esc(k)}" ${ck.type === k && !ck.auto ? "selected" : ""}>${esc(v.label)}</option>`);
+            }
             html += `<div class="kq-uid">
                 <div class="kq-section-title"><i class="fa-solid fa-store"></i> วิธีเช็คยอด</div>
                 <div class="kq-uid-row">
