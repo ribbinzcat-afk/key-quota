@@ -15,7 +15,7 @@ const state = {
     pricingCache: new Map(),          // root -> { data, at }
     busyAll: false, lastAutoAt: 0, autoTimer: null,
     gens: 0, genModel: "", pendingIn: null,
-    $panel: null, search: {}, focusSearch: "",
+    $panel: null, search: {}, focusSearch: "", showAll: {},
     warned: new Set(),
 };
 
@@ -211,7 +211,7 @@ function refreshUi() {
         renderPanel(state.$panel, {
             targets: state.targets, results: state.results, primaryId: state.primaryId,
             busyAll: state.busyAll, listing: !!state.listing, listError: state.listError,
-            search: state.search, focusSearch: state.focusSearch,
+            search: state.search, focusSearch: state.focusSearch, showAll: state.showAll,
         }, s, getPack);
         state.focusSearch = "";
     }
@@ -230,6 +230,16 @@ async function openPanel() {
         const id = String($(this).data("id") || "");
         const s = getSettings();
         if (act === "check-all") return checkAll();
+        if (act === "show-all") { state.showAll[id] = !state.showAll[id]; return refreshUi(); }
+        if (act === "fav") {
+            const t = state.targets.find(x => x.id === id);
+            const model = String($(this).data("model") || "");
+            if (!t || !model) return;
+            const list = new Set(s.favModels[t.root] || []);
+            list.has(model) ? list.delete(model) : list.add(model);
+            s.favModels[t.root] = [...list];
+            saveSettings(); return refreshUi();
+        }
         if (act === "uid-show") {
             const $i = $(this).closest(".kq-uid").find('input[data-kq="uid-token"]');
             $i.attr("type", $i.attr("type") === "password" ? "text" : "password");
@@ -383,6 +393,7 @@ function syncSettingsUi() {
     $("#kq-avg-in").val(s.avgIn);
     $("#kq-avg-out").val(s.avgOut);
     $("#kq-prices").val(s.manualPrices);
+    $("#kq-max-rows").val(s.maxModelRows);
     $("#kq-group").val(s.group || "");
     const n = Object.values(s.costSamples || {}).reduce((a, b) => a + (b?.length || 0), 0);
     $("#kq-samples-info").text(`เก็บไว้: ขนาดข้อความ ${s.measured.in.length} ครั้ง · ราคาจริง ${n} ครั้ง`);
@@ -442,6 +453,7 @@ function bindSettingsHandlers() {
     on("#kq-measured", "change", function () { setSetting("useMeasuredTokens", this.checked); refreshUi(); });
     on("#kq-avg-in", "change", function () { setSetting("avgIn", Math.max(0, Math.round(num(this.value, 6000)))); refreshUi(); });
     on("#kq-avg-out", "change", function () { setSetting("avgOut", Math.max(0, Math.round(num(this.value, 500)))); refreshUi(); });
+    on("#kq-max-rows", "change", function () { setSetting("maxModelRows", Math.max(3, Math.round(num(this.value, 10)))); refreshUi(); });
     on("#kq-prices", "change", function () { setSetting("manualPrices", this.value); refreshUi(); });
     on("#kq-open-panel", "click", openPanel);
     on("#kq-check-all", "click", () => checkAll());

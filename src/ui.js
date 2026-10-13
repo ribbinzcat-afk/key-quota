@@ -209,25 +209,39 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
             </div>`;
         }
 
-        // ตารางโมเดล
-        const rows = est.rows;
+        // ตารางโมเดล (จำกัดจำนวน: โมเดลที่ใช้อยู่ + ที่ปักหมุด + ตามด้วยที่เหลือ)
+        const favs = new Set(s.favModels?.[t.root] || []);
+        const rows = est.rows
+            .filter(x => /[A-Za-z0-9]/.test(x.model))           // ตัดรายการที่เป็นประกาศของร้าน เช่น "测试"
+            .map(x => ({ ...x, fav: favs.has(x.model) }))
+            .sort((a, b) => (b.current - a.current) || (b.fav - a.fav));
         if (rows.length) {
             const q = String(view.search?.[t.id] || "").toLowerCase();
-            html += `<input class="text_pole kq-search" type="search" data-id="${esc(t.id)}" placeholder="ค้นหาโมเดล..." value="${esc(view.search?.[t.id] || "")}">
+            const limit = Math.max(3, Number(s.maxModelRows) || 10);
+            const showAll = !!view.showAll?.[t.id] || !!q;
+            const matched = q ? rows.filter(x => x.model.toLowerCase().includes(q)) : rows;
+            const visible = showAll ? matched.slice(0, 300) : matched.slice(0, Math.max(limit, matched.filter(x => x.current || x.fav).length));
+            html += `<input class="text_pole kq-search" type="search" data-id="${esc(t.id)}" placeholder="ค้นหาโมเดล (มี ${rows.length.toLocaleString()} ตัว)..." value="${esc(view.search?.[t.id] || "")}">
             <div class="kq-table-wrap"><table class="kq-table">
             <thead><tr><th>โมเดล</th><th>ต่อข้อความ</th><th>${est.storeCounted ? "เหลือ / ทั้งหมด" : "เหลือ"}</th><th>ที่มา</th></tr></thead><tbody>`;
-            let shown = 0;
-            for (const x of rows) {
-                if (q && !x.model.toLowerCase().includes(q)) continue;
-                if (++shown > 150) break;
+            for (const x of visible) {
                 const low = x.messages !== null && x.messages <= (Number(s.warnMessages) || 0);
+                const star = x.current
+                    ? `<i class="fa-solid fa-star kq-star kq-star-cur" title="โมเดลที่ใช้อยู่"></i>`
+                    : `<i class="${x.fav ? "fa-solid" : "fa-regular"} fa-star kq-star" data-kq="fav" data-id="${esc(t.id)}" data-model="${esc(x.model)}" title="${x.fav ? "เลิกปักหมุด" : "ปักหมุดไว้บนสุด"}"></i>`;
                 html += `<tr class="${x.current ? "kq-current" : ""}">
-                    <td>${x.current ? `<i class="fa-solid fa-star"></i> ` : ""}${esc(x.model)}</td>
+                    <td>${star} ${esc(x.model)}</td>
                     <td>${x.perMsgUsd ? esc(fmtMoney(x.perMsgUsd, est.cur)) : "—"}</td>
                     <td class="${low ? "kq-lowtext" : ""}">${x.messages !== null && x.messages !== undefined ? esc(est.storeCounted ? `${x.messages.toLocaleString()} / ${(x.total ?? "?").toLocaleString()}` : fmtCount(x.messages)) : "—"}</td>
                     <td class="kq-src">${esc(x.source || "ไม่มีราคา")}${x.samples ? ` (${x.samples})` : ""}</td></tr>`;
             }
             html += `</tbody></table></div>`;
+            if (!q && matched.length > limit) {
+                html += `<div class="kq-row"><small class="kq-dim">แสดง ${visible.length.toLocaleString()} จาก ${matched.length.toLocaleString()} โมเดล · กด ☆ เพื่อปักหมุดโมเดลที่ใช้บ่อย</small>
+                    <div class="menu_button kq-btn" data-kq="show-all" data-id="${esc(t.id)}">${showAll ? "ย่อรายการ" : `แสดงทั้งหมด (${matched.length.toLocaleString()})`}</div></div>`;
+            } else if (q && !matched.length) {
+                html += `<small class="kq-dim">ไม่พบโมเดลที่ตรงกับ “${esc(q)}”</small>`;
+            }
         } else if (snap) {
             html += `<div class="kq-note">ร้านนี้ไม่เปิดตารางราคา — ส่งข้อความด้วยคีย์นี้สักครั้ง extension จะวัดราคาจริงให้ หรือกรอกราคาเองในหน้าตั้งค่า</div>`;
         }

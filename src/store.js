@@ -42,6 +42,8 @@ export const defaultSettings = {
     openCards: {},             // targetId -> true (การ์ดที่กางไว้ในแผง)
     userAuth: {},              // targetId -> { uid, token } ใช้เช็คยอดของบัญชีตัวเอง
     checkers: {},              // targetId -> { type: "popko", provider } หน้าเช็คของร้าน
+    maxModelRows: 10,          // จำนวนโมเดลในตารางก่อนกด “แสดงทั้งหมด”
+    favModels: {},             // root -> [ชื่อโมเดลที่ปักหมุด]
 };
 
 let migrated = false;
@@ -60,6 +62,7 @@ export function getSettings() {
     if (!s.openCards || typeof s.openCards !== "object") s.openCards = {};
     if (!s.userAuth || typeof s.userAuth !== "object") s.userAuth = {};
     if (!s.checkers || typeof s.checkers !== "object") s.checkers = {};
+    if (!s.favModels || typeof s.favModels !== "object") s.favModels = {};
 
     // ย้ายค่าจากเวอร์ชัน 1.0 (คีย์เดียว)
     if (!migrated) {

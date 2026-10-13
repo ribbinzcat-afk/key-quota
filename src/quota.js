@@ -324,6 +324,8 @@ const NAME_HINTS = [
 /** เลือกวิธีเช็คอัตโนมัติจาก URL หรือชื่อ Connection Profile / ชื่อคีย์ (ผู้ใช้เปลี่ยนเองได้ในการ์ด) */
 export function autoChecker(root, labels = []) {
     if (rvlChannelOf(root)) return { type: "rvl", auto: true };
+    // ระบบใหม่ของ RVL (shop.rvlconnect.com) เป็น new-api ปกติ → ใช้วิธีมาตรฐาน แม้ชื่อโปรไฟล์จะมีคำว่า rvl
+    if (/^https?:\/\/shop\.rvlconnect\.com/i.test(String(root || ""))) return null;
     if (/popkoproxyhub\.com/i.test(root)) return { type: "popko", auto: true };
     const text = (Array.isArray(labels) ? labels : [labels]).join(" ");
     for (const h of NAME_HINTS) if (h.re.test(text)) return { type: h.type, auto: true, byName: true };
