@@ -61,7 +61,9 @@ export async function fetchStoreStatus(root) {
 /** /api/pricing ของ new-api: ตารางราคาทุกโมเดล */
 export async function fetchPricing(root, key) {
     try {
-        const res = await fetchJson(`${root}/api/pricing`, key, { timeoutMs: 12000 });
+        // หน้าราคาเปิดสาธารณะ — ไม่ส่งคีย์ก่อน (บางร้านตอบ 401 เมื่อเจอ sk-key ในช่องนี้)
+        let res = await fetchJson(`${root}/api/pricing`, null, { timeoutMs: 15000 });
+        if (!res.ok || !Array.isArray(res.json?.data)) res = await fetchJson(`${root}/api/pricing`, key, { timeoutMs: 15000 });
         const j = res?.json;
         if (!res.ok || !j || !Array.isArray(j.data)) return null;
         const models = j.data

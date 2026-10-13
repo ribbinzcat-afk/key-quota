@@ -149,6 +149,9 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
             ${t.error ? "" : `<div class="menu_button kq-btn" data-kq="check-one" data-id="${esc(t.id)}"><i class="fa-solid fa-rotate"></i> เช็คคีย์นี้</div>`}
         </div>`;
         if (snap?.note) html += `<div class="kq-note">${esc(snap.note)}</div>`;
+        if (snap && /new-api/.test(snap.kind || "") && !r?.pricing) {
+            html += `<div class="kq-note">ดึงตารางราคาของร้านไม่ได้ (/api/pricing) จึงยังคำนวณจำนวนข้อความไม่ได้ — จะลองใหม่ตอนเช็ครอบหน้า ถ้ายังไม่ได้ ให้ตั้ง enableCorsProxy: true ใน config.yaml</div>`;
+        }
         if (snap && typeof snap.remainingUsd === "number") {
             html += `<div class="kq-stats">
                 ${stat("คงเหลือ", fmtMoney(snap.remainingUsd, est.cur), fmtQuota(snap.remainingUsd, snap))}

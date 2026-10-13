@@ -90,7 +90,7 @@ async function getPricing(root, key) {
     const c = state.pricingCache.get(root);
     if (c && Date.now() - c.at < PRICING_TTL_MS) return c.data;
     const data = await fetchPricing(root, key);
-    state.pricingCache.set(root, { data, at: Date.now() });
+    if (data) state.pricingCache.set(root, { data, at: Date.now() });   // ดึงไม่ได้ → ลองใหม่รอบหน้า
     return data;
 }
 
