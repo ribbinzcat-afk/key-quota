@@ -8,7 +8,7 @@ export const esc = (v) => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp
 const KIND_LABEL = {
     "new-api": "new-api (ยอดของคีย์)",
     "new-api (บัญชี)": "new-api (ยอดของบัญชีที่ออกคีย์)",
-    "new-api (UID)": "new-api (ยอดของ UID ของคุณ)",
+    "new-api (UID)": "ยอด Wallet ของบัญชี (UID)",
     "store-popko": "หน้าเช็คของร้าน POPKO",
     "store-rvl": "หน้าเช็คของร้าน RVL Connect",
     "billing": "one-api / OpenAI billing",
@@ -41,7 +41,7 @@ export function summarize(t, r, s, getPack) {
     let money = "—";
     if (snap) {
         if (typeof snap.remainingUsd === "number") money = fmtMoney(snap.remainingUsd, est.cur);
-        else if (snap.unlimited) money = "ไม่จำกัด";
+        else if (snap.unlimited) money = snap.needsWallet ? "คีย์ไม่จำกัด" : "ไม่จำกัด";
         else if (snap.kind === "models-only") money = "คีย์ใช้ได้";
         else if (est.storeCounted) money = row ? `${row.messages.toLocaleString()} ข้อความ` : `${est.rows.length} โมเดล`;
         else if (snap.kind === "store-rvl") money = "คีย์ใช้ได้";
@@ -198,7 +198,7 @@ function renderCard(t, r, s, getPack, isPrimary, view, tok) {
                     <input type="password" class="text_pole" data-kq="uid-token" data-id="${esc(t.id)}" placeholder="Access Token (ถ้ามี)" autocomplete="off" value="${esc(ua.token || "")}">
                     <div class="menu_button kq-btn fa-solid fa-eye" data-kq="uid-show" data-id="${esc(t.id)}" title="แสดง/ซ่อน"></div>
                 </div>
-                <small class="kq-dim">ใส่ UID ที่ร้านให้มา ถ้าร้านไม่ยอมรับ sk-key ให้ใส่ Access Token ของบัญชีด้วย (บนเว็บร้าน: ตั้งค่าส่วนตัว → 系统访问令牌 / Access Token)</small>
+                <small class="kq-dim">ใช้ดูยอด Wallet ของบัญชีบนร้านที่เป็น new-api — UID คือเลข ID ของบัญชี ส่วน Access Token สร้างได้ที่เว็บร้าน: ตั้งค่าส่วนตัว (Personal Settings) → System Access Token / 系统访问令牌 (คนละอันกับ sk-key)</small>
             </div>`;
         }
 

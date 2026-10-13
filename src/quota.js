@@ -205,8 +205,10 @@ async function checkByKey(root, key, base, qpu) {
                 expiresAt: Number(sub.json.access_until) > 0 ? Number(sub.json.access_until) * 1000 : tokenSnap?.expiresAt ?? null,
                 tokenName: tokenSnap?.tokenName || "",
                 modelLimits: tokenSnap?.modelLimits || null,
-                shared: !!tokenSnap,
-                note: tokenSnap ? "คีย์นี้ไม่ได้จำกัดยอดในตัว ยอดที่เห็นเป็นยอดของบัญชีที่ออกคีย์ ถ้าคนกลางใช้บัญชีเดียวแจกคีย์ให้หลายคน ยอดนี้คือยอดรวมของทุกคน — ใส่ UID (และ Access Token) ในการ์ดนี้เพื่อดูยอดของตัวเอง" : "",
+                shared: !!tokenSnap && !unlimited,
+                needsWallet: unlimited,
+                note: unlimited ? "คีย์นี้ตั้งเป็นไม่จำกัด ร้านจึงไม่บอกยอดผ่านคีย์ — ยอดจริงอยู่ใน Wallet ของบัญชี ใส่ UID + Access Token ในการ์ดนี้เพื่อดูยอด Wallet"
+                    : tokenSnap ? "คีย์นี้ไม่ได้จำกัดยอดในตัว ยอดที่เห็นเป็นยอดของบัญชีที่ออกคีย์ ถ้าคนกลางใช้บัญชีเดียวแจกคีย์ให้หลายคน ยอดนี้คือยอดรวมของทุกคน — ใส่ UID (และ Access Token) ในการ์ดนี้เพื่อดูยอดของตัวเอง" : "",
             };
             return snap;
         }
@@ -214,7 +216,7 @@ async function checkByKey(root, key, base, qpu) {
         if (e instanceof CorsError) throw e;
     }
 
-    if (tokenSnap) return { ...tokenSnap, note: "คีย์ตั้งเป็นไม่จำกัด และร้านไม่บอกยอดบัญชี" };
+    if (tokenSnap) return { ...tokenSnap, needsWallet: true, note: "คีย์นี้ตั้งเป็นไม่จำกัด ร้านจึงไม่บอกยอดผ่านคีย์ — ยอดจริงอยู่ใน Wallet ของบัญชี ใส่ UID + Access Token ในการ์ดนี้เพื่อดูยอด Wallet" };
 
     // 4) ไม่มี endpoint เช็คยอด → เช็คแค่ว่าคีย์ยังใช้ได้
     const m = await fetchModels(root, key);
